@@ -1,0 +1,17 @@
+[package]
+name = "dioxus_windows_form"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dioxus = { version = "0.7", default-features = false }
+dioxus-signals = "0.7"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+palette = "0.7.6"
+
+[features]
+default = ["desktop"]
+desktop = ["dioxus/desktop", "dioxus/launch", "dioxus/lib"]
+bundle = []

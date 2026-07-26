@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target/
+
+# Portable application data and local databases
+/data/
+/*.sqlite3
+/*.sqlite3-*
+
+# Local editor and operating-system files
+/.idea/
+/.vscode/
+*.swp
+*.tmp
+*.log
+Thumbs.db
+.DS_Store
+
+# Local reference screenshots
+/1.png
+/1111.png
+/12.jpg
