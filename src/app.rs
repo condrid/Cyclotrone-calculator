@@ -155,6 +155,25 @@ struct CalculationTabInfo {
     loaded: bool,
 }
 
+#[derive(Clone)]
+struct ActualFillGroupView {
+    vials: Vec<ActualFillVialView>,
+    name: String,
+    requested_activity_gbq: String,
+    requested_time: String,
+    deviation: Option<ActualFillDeviation>,
+}
+
+#[derive(Clone)]
+struct ActualFillVialView {
+    consumer_index: usize,
+    name: String,
+    requested_activity_gbq: String,
+    actual_fill_time: String,
+    actual_fill_activity_mbq: String,
+    actual_at_filling_gbq: Option<f64>,
+}
+
 #[derive(Props, Clone, PartialEq)]
 struct CalculationTabProps {
     interface_color: String,
@@ -217,6 +236,26 @@ fn vial_noun(count: usize) -> &'static str {
             _ => "флаконов",
         }
     }
+}
+
+fn format_deviation_activity(value_gbq: f64) -> String {
+    let absolute = value_gbq.abs();
+    if absolute < 1.0 {
+        format!("{} МБк", format_activity_value(absolute * 1000.0))
+    } else {
+        format!("{} ГБк", format_activity_value(absolute))
+    }
+}
+
+fn format_deviation_percent(value: f64) -> String {
+    let sign = if value > 0.0 {
+        "+"
+    } else if value < 0.0 {
+        "−"
+    } else {
+        ""
+    };
+    format!("{sign}{}%", format_activity_value(value.abs()))
 }
 
 fn sanitize_print_title(value: &str) -> String {
@@ -423,6 +462,8 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                     vial_group_id: Some(next_group_id),
                     vial_group_source_name: Some(source_name.clone()),
                     vial_group_original_activity: Some(original_activity.clone()),
+                    actual_fill_time: String::new(),
+                    actual_fill_activity_mbq: String::new(),
                 })
                 .collect::<Vec<_>>();
             let mut updated = current.clone();
@@ -578,6 +619,85 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
     let has_product_excess = series_adjustment.is_some_and(|(_, _, has_excess)| has_excess);
     let exact_eob_total = rows.iter().filter_map(|row| row.11).sum::<f64>();
     activity_totals[0] = format_adaptive_value(exact_eob_total);
+    let actual_fill_groups = {
+        let directory = consumers.read();
+        let mut grouped_indices = Vec::<Vec<usize>>::new();
+
+        for (consumer_index, consumer) in directory.iter().enumerate() {
+            if consumer.is_mandatory {
+                continue;
+            }
+            if let Some(group_id) = consumer.vial_group_id {
+                if let Some(group) = grouped_indices
+                    .iter_mut()
+                    .find(|group| directory[group[0]].vial_group_id == Some(group_id))
+                {
+                    group.push(consumer_index);
+                    continue;
+                }
+            }
+            grouped_indices.push(vec![consumer_index]);
+        }
+
+        grouped_indices
+            .into_iter()
+            .map(|consumer_indices| {
+                let first = &directory[consumer_indices[0]];
+                let requested_activity_gbq = first
+                    .vial_group_original_activity
+                    .clone()
+                    .unwrap_or_else(|| first.activity.clone());
+                let requested_time = first.requested_time.clone();
+                let measurements = consumer_indices
+                    .iter()
+                    .map(|index| {
+                        let consumer = &directory[*index];
+                        (
+                            consumer.actual_fill_activity_mbq.as_str(),
+                            consumer.actual_fill_time.as_str(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let deviation = actual_fill_deviation(
+                    &requested_activity_gbq,
+                    &requested_time,
+                    &filling_start.read(),
+                    isotope_half_life_minutes,
+                    &measurements,
+                );
+                let vials = consumer_indices
+                    .iter()
+                    .map(|index| {
+                        let consumer = &directory[*index];
+                        ActualFillVialView {
+                            consumer_index: *index,
+                            name: consumer.name.clone(),
+                            requested_activity_gbq: consumer.activity.clone(),
+                            actual_fill_time: consumer.actual_fill_time.clone(),
+                            actual_fill_activity_mbq: consumer.actual_fill_activity_mbq.clone(),
+                            actual_at_filling_gbq: measured_activity_at_filling_time(
+                                &consumer.actual_fill_activity_mbq,
+                                &consumer.actual_fill_time,
+                                &filling_start.read(),
+                                isotope_half_life_minutes,
+                            ),
+                        }
+                    })
+                    .collect();
+
+                ActualFillGroupView {
+                    vials,
+                    name: first
+                        .vial_group_source_name
+                        .clone()
+                        .unwrap_or_else(|| first.name.clone()),
+                    requested_activity_gbq,
+                    requested_time,
+                    deviation,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
     let total_target_current = match target_count().as_str() {
         "1" => parse_decimal(&target_current_1.read()),
         "2" => parse_decimal(&target_current_1.read())
@@ -681,6 +801,7 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
         style { {PRINT_ADJUSTMENT_STYLE} }
         style { {PRINT_THEME_STYLE} }
         style { {REPORT_TITLE_STYLE} }
+        style { {ACTUAL_FILL_STYLE} }
         main { class: "shell", style: "{interface_theme_style}",
             header { class: "topbar",
                 div { class: "title-and-tabs",
@@ -1197,6 +1318,152 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                             td { strong { "{adjustment_display}" } }
                         }
                     }
+                    }
+                    div { class: "actual-fill-section",
+                        div { class: "actual-fill-heading",
+                            div {
+                                h2 { "Контроль фактического налива" }
+                                p { "Отклонение рассчитывается по всей заявке на время заявки" }
+                            }
+                            span { class: "actual-filling-time",
+                                span { "Время фасовки" }
+                                strong { "{filling_start}" }
+                            }
+                        }
+                        if actual_fill_groups.is_empty() {
+                            div { class: "actual-fill-empty",
+                                "Добавьте реального потребителя, чтобы выполнить контроль налива."
+                            }
+                        } else {
+                            table { class: "actual-fill-table",
+                                thead { tr {
+                                    th { "Потребитель / флакон" }
+                                    th { div { "Время измерения" } small { "ЧЧ:ММ" } }
+                                    th { div { "Фактическая активность" } small { "МБк" } }
+                                    th { div { "Фактически к фасовке" } small { "ГБк" } }
+                                    th { div { "Активность по заявке" } small { "ГБк" } }
+                                    th { "Результат" }
+                                } }
+                                tbody {
+                                    for group in actual_fill_groups.iter() {
+                                        for (vial_position, vial) in group.vials.iter().enumerate() {
+                                            tr {
+                                                class: if group.vials.len() > 1 {
+                                                    if vial_position == 0 {
+                                                        "actual-vial-group actual-vial-first"
+                                                    } else if vial_position + 1 == group.vials.len() {
+                                                        "actual-vial-group actual-vial-last"
+                                                    } else {
+                                                        "actual-vial-group"
+                                                    }
+                                                } else {
+                                                    ""
+                                                },
+                                                td { class: "actual-vial-name",
+                                                    strong { "{vial.name}" }
+                                                    if group.vials.len() > 1 {
+                                                        small {
+                                                            "План флакона: {format_activity(&vial.requested_activity_gbq).unwrap_or_else(|| \"—\".into())} ГБк"
+                                                        }
+                                                    }
+                                                }
+                                                td {
+                                                    TimeField {
+                                                        value: vial.actual_fill_time.clone(),
+                                                        oninput: {
+                                                            let consumer_index = vial.consumer_index;
+                                                            move |value| consumers.write()[consumer_index].actual_fill_time = value
+                                                        }
+                                                    }
+                                                }
+                                                td {
+                                                    div { class: "input-with-unit actual-activity-input",
+                                                        input {
+                                                            value: "{vial.actual_fill_activity_mbq}",
+                                                            oninput: {
+                                                                let consumer_index = vial.consumer_index;
+                                                                move |event| {
+                                                                    consumers.write()[consumer_index].actual_fill_activity_mbq =
+                                                                        event.value()
+                                                                }
+                                                            },
+                                                            onblur: {
+                                                                let consumer_index = vial.consumer_index;
+                                                                move |_| {
+                                                                    let formatted = {
+                                                                        let current = consumers.read();
+                                                                        format_activity(
+                                                                            &current[consumer_index].actual_fill_activity_mbq
+                                                                        )
+                                                                    };
+                                                                    if let Some(value) = formatted {
+                                                                        consumers.write()[consumer_index]
+                                                                            .actual_fill_activity_mbq = value;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        span { class: "field-unit", "МБк" }
+                                                    }
+                                                }
+                                                td {
+                                                    if let Some(activity) = vial.actual_at_filling_gbq {
+                                                        strong { "{format_activity_value(activity)}" }
+                                                    } else {
+                                                        span { class: "actual-fill-pending-value", "—" }
+                                                    }
+                                                }
+                                                if vial_position == 0 {
+                                                    td {
+                                                        class: "actual-request-cell",
+                                                        rowspan: "{group.vials.len()}",
+                                                        strong {
+                                                            "{format_activity(&group.requested_activity_gbq).unwrap_or_else(|| \"—\".into())}"
+                                                        }
+                                                        small { "на {group.requested_time}" }
+                                                        if group.vials.len() > 1 {
+                                                            span {
+                                                                "{group.vials.len()} {vial_noun(group.vials.len())} · {group.name}"
+                                                            }
+                                                        }
+                                                    }
+                                                    td {
+                                                        class: "actual-result-cell",
+                                                        rowspan: "{group.vials.len()}",
+                                                        if let Some(deviation) = group.deviation {
+                                                            div {
+                                                                class: if deviation.deviation_at_request_gbq < 0.0 {
+                                                                    "actual-result-badge deficit"
+                                                                } else {
+                                                                    "actual-result-badge excess"
+                                                                },
+                                                                strong {
+                                                                    if deviation.deviation_at_request_gbq < 0.0 {
+                                                                        "Недостаток"
+                                                                    } else if deviation.deviation_at_request_gbq > 0.0 {
+                                                                        "Избыток"
+                                                                    } else {
+                                                                        "Соответствует"
+                                                                    }
+                                                                }
+                                                                span {
+                                                                    "{format_deviation_activity(deviation.deviation_at_request_gbq)} · {format_deviation_percent(deviation.deviation_percent)}"
+                                                                }
+                                                            }
+                                                            small { class: "actual-comparison",
+                                                                "К фасовке: план {format_activity_value(deviation.requested_at_filling_gbq)} · факт {format_activity_value(deviation.actual_at_filling_gbq)} ГБк"
+                                                            }
+                                                        } else {
+                                                            span { class: "actual-result-pending", "Ожидает данных" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     div { class: "mock-note",
                         "Активность пересчитана ко времени до синтеза по закону радиоактивного распада для {selected_isotope_name} (T½ {format_activity_value(isotope_half_life_minutes)} мин)."
@@ -2108,3 +2375,4 @@ const VIAL_GROUP_REFINEMENT_STYLE: &str = ".vial-group-first{position:relative}.
 const PRINT_ADJUSTMENT_STYLE: &str = ".print-adjustment.dilution{border-color:var(--interface-accent);background:var(--interface-light);color:var(--interface-dark)}@media print{.print-adjustment.dilution{border-color:var(--interface-accent)!important;background:var(--interface-light)!important;color:var(--interface-dark)!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}}";
 const PRINT_THEME_STYLE: &str = ".print-document{border:1px solid color-mix(in srgb,var(--interface-accent) 38%,#dce3ec)}.print-metadata>div{background:color-mix(in srgb,var(--interface-light) 22%,white);border-color:color-mix(in srgb,var(--interface-accent) 34%,#cbd5e1)}.print-metadata strong{color:var(--interface-dark)}.print-table th{background:color-mix(in srgb,var(--interface-light) 74%,white);color:var(--interface-dark)}.print-table th,.print-table td{border-color:color-mix(in srgb,var(--interface-accent) 42%,#98a2b3)}.print-table tfoot td{background:color-mix(in srgb,var(--interface-light) 54%,white);color:var(--interface-dark)}.print-table .print-volume-column{background:color-mix(in srgb,var(--interface-light) 82%,white);border-left-color:var(--interface-accent);border-right-color:var(--interface-accent);color:var(--interface-dark)}.print-adjustment,.print-adjustment.dilution,.print-adjustment.excess{border-color:var(--interface-accent);background:color-mix(in srgb,var(--interface-light) 76%,white);color:var(--interface-dark)}@media print{.print-metadata>div,.print-table th,.print-table tfoot td,.print-table .print-volume-column,.print-adjustment,.print-adjustment.dilution,.print-adjustment.excess{-webkit-print-color-adjust:exact;print-color-adjust:exact}.print-table th{background:color-mix(in srgb,var(--interface-light) 74%,white)!important;color:var(--interface-dark)!important}.print-table tfoot td{background:color-mix(in srgb,var(--interface-light) 54%,white)!important;color:var(--interface-dark)!important}.print-table .print-volume-column{background:color-mix(in srgb,var(--interface-light) 82%,white)!important;border-color:var(--interface-accent)!important;color:var(--interface-dark)!important}.print-adjustment,.print-adjustment.dilution,.print-adjustment.excess{background:color-mix(in srgb,var(--interface-light) 76%,white)!important;border-color:var(--interface-accent)!important;color:var(--interface-dark)!important}}";
 const REPORT_TITLE_STYLE: &str = ".application-heading{display:flex;min-width:190px;max-width:310px;flex-direction:column;justify-content:center}.application-heading h1,.application-heading p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.application-heading .active-report-title{margin:3px 0 0;color:var(--interface-dark);font-weight:700}";
+const ACTUAL_FILL_STYLE: &str = ".actual-fill-section{min-width:980px;padding:18px 16px 22px;border-top:3px solid color-mix(in srgb,var(--interface-accent) 48%,#dce3ec);background:color-mix(in srgb,var(--interface-light) 16%,white)}.actual-fill-heading{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:12px}.actual-fill-heading h2{color:var(--interface-dark)}.actual-fill-heading p{margin:3px 0 0;color:#68778f;font-size:calc(12px + var(--font-increase))}.actual-filling-time{display:flex;align-items:center;gap:9px;padding:7px 11px;border:1px solid color-mix(in srgb,var(--interface-accent) 42%,#cbd5e1);border-radius:8px;background:var(--interface-light);color:var(--interface-dark)}.actual-filling-time span{font-size:calc(11px + var(--font-increase));font-weight:600}.actual-filling-time strong{font-size:calc(16px + var(--font-increase));font-variant-numeric:tabular-nums}.actual-fill-table{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:calc(13px + var(--font-increase));background:color-mix(in srgb,var(--interface-light) 8%,white);border:1px solid color-mix(in srgb,var(--interface-accent) 30%,#dce3ec);border-radius:9px;overflow:hidden}.actual-fill-table th,.actual-fill-table td{padding:8px;border-right:1px solid color-mix(in srgb,var(--interface-accent) 20%,#e5eaf0);border-bottom:1px solid color-mix(in srgb,var(--interface-accent) 20%,#e5eaf0);text-align:center;vertical-align:middle}.actual-fill-table th:last-child,.actual-fill-table td:last-child{border-right:0}.actual-fill-table tbody tr:last-child td{border-bottom:0}.actual-fill-table th{background:color-mix(in srgb,var(--interface-light) 72%,white);color:var(--interface-dark);font-size:calc(11px + var(--font-increase));text-transform:uppercase}.actual-fill-table th small{display:block;margin-top:3px;font-size:calc(10px + var(--font-increase));text-transform:none}.actual-fill-table th:nth-child(1){width:20%}.actual-fill-table th:nth-child(2){width:14%}.actual-fill-table th:nth-child(3){width:16%}.actual-fill-table th:nth-child(4){width:14%}.actual-fill-table th:nth-child(5){width:14%}.actual-fill-table th:nth-child(6){width:22%}.actual-fill-table input{height:calc(34px + var(--font-increase))!important;padding-top:5px!important;padding-bottom:5px!important}.actual-vial-name{text-align:left!important}.actual-vial-name strong,.actual-vial-name small{display:block}.actual-vial-name small{margin-top:3px;color:#68778f}.actual-vial-group td{background:color-mix(in srgb,var(--interface-light) 25%,white)}.actual-vial-first td{border-top:2px solid color-mix(in srgb,var(--interface-accent) 55%,#dce3ec)}.actual-vial-last td{border-bottom:2px solid color-mix(in srgb,var(--interface-accent) 55%,#dce3ec)}.actual-request-cell strong,.actual-request-cell small,.actual-request-cell span{display:block}.actual-request-cell strong{font-size:calc(15px + var(--font-increase));color:var(--interface-dark)}.actual-request-cell small{margin-top:3px;color:#68778f}.actual-request-cell span{margin-top:5px;color:var(--interface-dark);font-size:calc(10px + var(--font-increase));font-weight:700}.actual-result-badge{display:flex;flex-direction:column;align-items:center;gap:3px;padding:7px 9px;border-radius:8px;border:1px solid}.actual-result-badge.excess{background:#dcfce7;border-color:#86d7a8;color:#166534}.actual-result-badge.deficit{background:#fee2e2;border-color:#f3a6a6;color:#991b1b}.actual-result-badge span{font-variant-numeric:tabular-nums}.actual-comparison{display:block;margin-top:5px;color:#68778f;line-height:1.25}.actual-result-pending{display:inline-block;padding:6px 9px;border-radius:7px;background:#eef2f6;color:#68778f;font-weight:700}.actual-fill-pending-value{color:#98a2b3}.actual-fill-empty{padding:22px;border:1px dashed color-mix(in srgb,var(--interface-accent) 38%,#cbd5e1);border-radius:9px;text-align:center;color:#68778f}.actual-activity-input .field-unit{right:8px}.shell .actual-fill-table .time-menu{top:auto;bottom:100%;max-height:180px}";

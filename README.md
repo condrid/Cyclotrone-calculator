@@ -43,8 +43,9 @@ GitHub Actions. Готовый `Cyclotrone-calculator.exe` доступен в �
 отправить тег, совпадающий с версией из `Cargo.toml`:
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+$version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+git tag "v$version"
+git push origin "v$version"
 ```
 
 К релизу автоматически прикладываются исполняемый файл и его контрольная сумма

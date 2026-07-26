@@ -2,6 +2,14 @@ pub(crate) const F18_HALF_LIFE_MINUTES: f64 = 109.77;
 pub(crate) const SCIENTIFIC_FORMAT_THRESHOLD: f64 = 10_000.0;
 pub(crate) const VIAL_FILL_LIMIT_RATIO: f64 = 14.5 / 15.0;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ActualFillDeviation {
+    pub(crate) requested_at_filling_gbq: f64,
+    pub(crate) actual_at_filling_gbq: f64,
+    pub(crate) deviation_at_request_gbq: f64,
+    pub(crate) deviation_percent: f64,
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) enum IrradiationTimeError {
     InvalidInput,
@@ -265,6 +273,63 @@ pub(crate) fn activity_at_reference_time(
     Some((activity_at_reference, elapsed_minutes))
 }
 
+pub(crate) fn measured_activity_at_filling_time(
+    activity_mbq: &str,
+    measured_time: &str,
+    filling_time: &str,
+    half_life_minutes: f64,
+) -> Option<f64> {
+    if !half_life_minutes.is_finite() || half_life_minutes <= 0.0 {
+        return None;
+    }
+    let activity_gbq = parse_non_negative(activity_mbq)? / 1000.0;
+    let elapsed_minutes = nearest_signed_minutes(filling_time, measured_time)?;
+    Some(activity_gbq * 2_f64.powf(elapsed_minutes as f64 / half_life_minutes))
+}
+
+pub(crate) fn actual_fill_deviation(
+    requested_activity_gbq: &str,
+    requested_time: &str,
+    filling_time: &str,
+    half_life_minutes: f64,
+    measurements: &[(&str, &str)],
+) -> Option<ActualFillDeviation> {
+    if measurements.is_empty() {
+        return None;
+    }
+
+    let requested_activity = parse_non_negative(requested_activity_gbq)?;
+    if requested_activity <= 0.0 {
+        return None;
+    }
+    let request_elapsed_minutes = nearest_signed_minutes(filling_time, requested_time)?;
+    let requested_at_filling =
+        requested_activity * 2_f64.powf(request_elapsed_minutes as f64 / half_life_minutes);
+    let actual_at_filling = measurements
+        .iter()
+        .map(|(activity, time)| {
+            measured_activity_at_filling_time(activity, time, filling_time, half_life_minutes)
+        })
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .sum::<f64>();
+    let deviation_at_filling = actual_at_filling - requested_at_filling;
+    let deviation_at_request =
+        deviation_at_filling * 2_f64.powf(-(request_elapsed_minutes as f64) / half_life_minutes);
+
+    Some(ActualFillDeviation {
+        requested_at_filling_gbq: requested_at_filling,
+        actual_at_filling_gbq: actual_at_filling,
+        deviation_at_request_gbq: deviation_at_request,
+        deviation_percent: deviation_at_request / requested_activity * 100.0,
+    })
+}
+
+fn nearest_signed_minutes(from_time: &str, to_time: &str) -> Option<i32> {
+    let raw = minutes_from_midnight(to_time)? - minutes_from_midnight(from_time)?;
+    Some((raw + 12 * 60).rem_euclid(24 * 60) - 12 * 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +456,50 @@ mod tests {
             activity_at_reference_time("100", "08:00", "07:39", 21.0).expect("valid input");
         assert_eq!(elapsed, 21);
         assert!((activity - 200.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn recalculates_actual_mbq_measurement_to_filling_time() {
+        let at_filling =
+            measured_activity_at_filling_time("15000", "06:45", "06:30", F18_HALF_LIFE_MINUTES)
+                .expect("valid measurement");
+
+        assert!((at_filling - 16.49).abs() < 0.01);
+
+        let measured_before_filling =
+            measured_activity_at_filling_time("1000", "06:25", "06:30", F18_HALF_LIFE_MINUTES)
+                .expect("measurement before filling");
+        assert!(measured_before_filling < 1.0);
+    }
+
+    #[test]
+    fn calculates_group_deviation_at_request_time_without_yield() {
+        let deviation = actual_fill_deviation(
+            "10",
+            "07:30",
+            "06:30",
+            F18_HALF_LIFE_MINUTES,
+            &[("7000", "06:30"), ("8000", "06:30")],
+        )
+        .expect("complete group");
+
+        assert!((deviation.requested_at_filling_gbq - 14.60).abs() < 0.01);
+        assert!((deviation.actual_at_filling_gbq - 15.0).abs() < 0.001);
+        assert!((deviation.deviation_at_request_gbq - 0.27).abs() < 0.01);
+        assert!((deviation.deviation_percent - 2.70).abs() < 0.05);
+    }
+
+    #[test]
+    fn waits_for_every_actual_fill_measurement() {
+        assert_eq!(
+            actual_fill_deviation(
+                "10",
+                "07:30",
+                "06:30",
+                F18_HALF_LIFE_MINUTES,
+                &[("7000", "06:30"), ("", "06:30")],
+            ),
+            None
+        );
     }
 }

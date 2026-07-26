@@ -26,6 +26,8 @@ pub(crate) struct Consumer {
     pub(crate) vial_group_id: Option<u64>,
     pub(crate) vial_group_source_name: Option<String>,
     pub(crate) vial_group_original_activity: Option<String>,
+    pub(crate) actual_fill_time: String,
+    pub(crate) actual_fill_activity_mbq: String,
 }
 
 impl Consumer {
@@ -47,6 +49,8 @@ impl Consumer {
             vial_group_id: None,
             vial_group_source_name: None,
             vial_group_original_activity: None,
+            actual_fill_time: String::new(),
+            actual_fill_activity_mbq: String::new(),
         }
     }
 
@@ -61,6 +65,8 @@ impl Consumer {
             vial_group_id: None,
             vial_group_source_name: None,
             vial_group_original_activity: None,
+            actual_fill_time: String::new(),
+            actual_fill_activity_mbq: String::new(),
         }
     }
 
@@ -141,6 +147,8 @@ mod tests {
         assert!(!consumer.split_into_vials);
         assert!(!consumer.split_applied);
         assert_eq!(consumer.vial_group_id, None);
+        assert!(consumer.actual_fill_time.is_empty());
+        assert!(consumer.actual_fill_activity_mbq.is_empty());
     }
 
     #[test]
