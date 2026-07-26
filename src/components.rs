@@ -97,12 +97,10 @@ pub(crate) fn ConsumerPicker(
         .filter(|name| name.to_lowercase().contains(&query))
         .cloned()
         .collect::<Vec<_>>();
-    let matches_empty = matches.is_empty();
-    let can_create = !value.trim().is_empty()
-        && !options
+    let has_exact_match = !value.trim().is_empty()
+        && options
             .iter()
-            .any(|name| name.eq_ignore_ascii_case(value.trim()));
-    let create_value = value.clone();
+            .any(|name| name.trim().to_lowercase() == value.trim().to_lowercase());
 
     rsx! {
         div { class: "consumer-picker",
@@ -117,7 +115,7 @@ pub(crate) fn ConsumerPicker(
                     oninput.call(event.value());
                 }
             }
-            if open() {
+            if open() && !matches.is_empty() && !has_exact_match {
                 div { class: "consumer-menu",
                     for name in matches {
                         button {
@@ -130,21 +128,6 @@ pub(crate) fn ConsumerPicker(
                             },
                             "{name}"
                         }
-                    }
-                    if can_create {
-                        button {
-                            r#type: "button",
-                            class: "consumer-create",
-                            onmousedown: move |event| event.prevent_default(),
-                            onclick: move |_| {
-                                oninput.call(create_value.clone());
-                                open.set(false);
-                            },
-                            "Создать «{value}»"
-                        }
-                    }
-                    if matches_empty && !can_create {
-                        span { class: "consumer-empty", "Нет сохраненных потребителей" }
                     }
                 }
             }

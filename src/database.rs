@@ -245,19 +245,7 @@ pub(crate) fn save_calculation(
 ) -> rusqlite::Result<i64> {
     let connection = open_connection()?;
     initialize_schema(&connection)?;
-    for consumer in consumers {
-        let center_name = consumer
-            .vial_group_source_name
-            .as_deref()
-            .unwrap_or(&consumer.name)
-            .trim();
-        if !consumer.is_mandatory && !center_name.is_empty() {
-            connection.execute(
-                "INSERT OR IGNORE INTO centers (name) VALUES (?1)",
-                [center_name],
-            )?;
-        }
-    }
+    save_consumer_centers(&connection, consumers)?;
 
     let constants_json = to_json(settings)?;
     let inputs_json = to_json(consumers)?;
@@ -280,6 +268,7 @@ pub(crate) fn update_calculation(
 ) -> rusqlite::Result<()> {
     let connection = open_connection()?;
     initialize_schema(&connection)?;
+    save_consumer_centers(&connection, consumers)?;
     let updated = connection.execute(
         "UPDATE calculations
          SET drug_id = ?2, drug_type = ?3, constants_json = ?4, inputs_json = ?5,
@@ -394,7 +383,52 @@ pub(crate) fn load_centers() -> rusqlite::Result<Vec<String>> {
          ORDER BY name",
     )?;
     let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-    rows.collect()
+    let mut centers = Vec::new();
+    for row in rows {
+        let name = row?;
+        let normalized = name.trim().to_lowercase();
+        if !centers
+            .iter()
+            .any(|existing: &String| existing.trim().to_lowercase() == normalized)
+        {
+            centers.push(name);
+        }
+    }
+    centers.sort_by_key(|name| name.to_lowercase());
+    Ok(centers)
+}
+
+fn save_consumer_centers(connection: &Connection, consumers: &[Consumer]) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare("SELECT name FROM centers")?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut known_names = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+
+    for consumer in consumers {
+        if consumer.is_mandatory {
+            continue;
+        }
+        let center_name = consumer
+            .vial_group_source_name
+            .as_deref()
+            .unwrap_or(&consumer.name)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if center_name.is_empty() {
+            continue;
+        }
+        let normalized = center_name.to_lowercase();
+        if known_names
+            .iter()
+            .any(|name| name.trim().to_lowercase() == normalized)
+        {
+            continue;
+        }
+        connection.execute("INSERT INTO centers (name) VALUES (?1)", [&center_name])?;
+        known_names.push(center_name);
+    }
+    Ok(())
 }
 
 pub(crate) fn count_saved_calculations() -> rusqlite::Result<usize> {
@@ -683,5 +717,23 @@ mod tests {
         assert_eq!(count, 14);
         assert!((f18_half_life - 109.77).abs() < f64::EPSILON);
         assert!((c11_half_life - 20.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn consumer_directory_is_case_insensitive_for_cyrillic_names() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        initialize_schema(&connection).expect("schema");
+        let mut first = Consumer::new(false);
+        first.name = "ПОДОльск".into();
+        let mut second = Consumer::new(false);
+        second.name = "ПодОльск".into();
+
+        save_consumer_centers(&connection, &[first]).expect("first consumer");
+        save_consumer_centers(&connection, &[second]).expect("same consumer with another case");
+
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM centers", [], |row| row.get(0))
+            .expect("consumer count");
+        assert_eq!(count, 1);
     }
 }

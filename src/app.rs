@@ -173,7 +173,6 @@ struct ActualFillVialView {
     requested_activity_gbq: String,
     actual_fill_time: String,
     actual_fill_activity_mbq: String,
-    actual_at_filling_gbq: Option<f64>,
     deviation: Option<ActualFillDeviation>,
 }
 
@@ -293,6 +292,348 @@ fn ActualDeviationResult(deviation: Option<ActualFillDeviation>) -> Element {
     }
 }
 
+#[component]
+fn CompactActualDeviationResult(deviation: Option<ActualFillDeviation>) -> Element {
+    rsx! {
+        if let Some(deviation) = deviation {
+            div {
+                class: if deviation.deviation_at_request_gbq < 0.0 {
+                    "actual-result-badge deficit"
+                } else {
+                    "actual-result-badge excess"
+                },
+                strong {
+                    if deviation.deviation_at_request_gbq < 0.0 {
+                        "Недостаток"
+                    } else if deviation.deviation_at_request_gbq > 0.0 {
+                        "Избыток"
+                    } else {
+                        "Соответствует"
+                    }
+                }
+                span {
+                    "{format_activity_value(deviation.deviation_at_request_gbq.abs())} ГБк · {format_deviation_percent(deviation.deviation_percent)}"
+                }
+            }
+        } else {
+            span { class: "actual-result-pending", "Ожидает данные" }
+        }
+    }
+}
+
+#[component]
+fn ActualAtRequestBadge(deviation: Option<ActualFillDeviation>) -> Element {
+    rsx! {
+        if let Some(deviation) = deviation {
+            span {
+                class: if deviation.deviation_at_request_gbq < 0.0 {
+                    "actual-at-request-badge deficit"
+                } else {
+                    "actual-at-request-badge excess"
+                },
+                "{format_activity_value(deviation.actual_at_request_gbq)}"
+            }
+        } else {
+            span { class: "actual-fill-pending-value", "—" }
+        }
+    }
+}
+
+fn evaluate_calculator_expression(expression: &str) -> Option<f64> {
+    struct Parser {
+        chars: Vec<char>,
+        position: usize,
+    }
+
+    impl Parser {
+        fn skip_spaces(&mut self) {
+            while self
+                .chars
+                .get(self.position)
+                .is_some_and(|value| value.is_whitespace())
+            {
+                self.position += 1;
+            }
+        }
+
+        fn expression(&mut self) -> Option<f64> {
+            let mut value = self.term()?;
+            loop {
+                self.skip_spaces();
+                match self.chars.get(self.position).copied() {
+                    Some('+') => {
+                        self.position += 1;
+                        value += self.term()?;
+                    }
+                    Some('-' | '−') => {
+                        self.position += 1;
+                        value -= self.term()?;
+                    }
+                    _ => return Some(value),
+                }
+            }
+        }
+
+        fn term(&mut self) -> Option<f64> {
+            let mut value = self.number()?;
+            loop {
+                self.skip_spaces();
+                match self.chars.get(self.position).copied() {
+                    Some('*' | '×') => {
+                        self.position += 1;
+                        value *= self.number()?;
+                    }
+                    Some('/' | '÷') => {
+                        self.position += 1;
+                        let divisor = self.number()?;
+                        if divisor == 0.0 {
+                            return None;
+                        }
+                        value /= divisor;
+                    }
+                    _ => return value.is_finite().then_some(value),
+                }
+            }
+        }
+
+        fn number(&mut self) -> Option<f64> {
+            self.skip_spaces();
+            let start = self.position;
+            if matches!(self.chars.get(self.position), Some('+' | '-' | '−')) {
+                self.position += 1;
+            }
+            while matches!(self.chars.get(self.position), Some('0'..='9' | '.' | ',')) {
+                self.position += 1;
+            }
+            if self.position == start {
+                return None;
+            }
+            self.chars[start..self.position]
+                .iter()
+                .collect::<String>()
+                .replace('−', "-")
+                .replace(',', ".")
+                .parse::<f64>()
+                .ok()
+        }
+    }
+
+    let mut parser = Parser {
+        chars: expression.chars().collect(),
+        position: 0,
+    };
+    let value = parser.expression()?;
+    parser.skip_spaces();
+    (parser.position == parser.chars.len() && value.is_finite()).then_some(value)
+}
+
+#[component]
+fn ActivityCalculator(isotope_name: String, half_life_minutes: f64) -> Element {
+    let mut decay_mode = use_signal(|| false);
+    let mut display = use_signal(String::new);
+    let mut activity = use_signal(String::new);
+    let mut activity_in_mbq = use_signal(|| false);
+    let mut source_time = use_signal(String::new);
+    let mut target_time = use_signal(String::new);
+
+    let decay_result = {
+        let parsed_activity = parse_decimal(&activity());
+        let parse_time = |value: &str| -> Option<i32> {
+            let (hours, minutes) = value.split_once(':')?;
+            let hours = hours.parse::<i32>().ok()?;
+            let minutes = minutes.parse::<i32>().ok()?;
+            (hours < 24 && minutes < 60).then_some(hours * 60 + minutes)
+        };
+        parsed_activity
+            .zip(parse_time(&source_time()))
+            .zip(parse_time(&target_time()))
+            .and_then(|((value, source), target)| {
+                if value < 0.0 || !half_life_minutes.is_finite() || half_life_minutes <= 0.0 {
+                    return None;
+                }
+                let elapsed = (target - source + 12 * 60).rem_euclid(24 * 60) - 12 * 60;
+                Some(value * 2_f64.powf(-(elapsed as f64) / half_life_minutes))
+            })
+    };
+    let standard_result = evaluate_calculator_expression(&display());
+
+    rsx! {
+        aside { class: "activity-calculator",
+            div { class: "calculator-mode-switch",
+                button {
+                    class: if !decay_mode() { "active" } else { "" },
+                    onclick: move |_| decay_mode.set(false),
+                    "Обычный"
+                }
+                button {
+                    class: if decay_mode() { "active" } else { "" },
+                    onclick: move |_| decay_mode.set(true),
+                    "Активность"
+                }
+            }
+            if decay_mode() {
+                div { class: "decay-calculator",
+                    div { class: "calculator-isotope",
+                        strong { "{isotope_name}" }
+                        span { "T½ {format_activity_value(half_life_minutes)} мин" }
+                    }
+                    label {
+                        div { class: "calculator-field-heading",
+                            span { "Исходная активность" }
+                            div { class: "calculator-unit-switch",
+                                button {
+                                    class: if !activity_in_mbq() { "active" } else { "" },
+                                    onclick: move |_| activity_in_mbq.set(false),
+                                    "ГБк"
+                                }
+                                button {
+                                    class: if activity_in_mbq() { "active" } else { "" },
+                                    onclick: move |_| activity_in_mbq.set(true),
+                                    "МБк"
+                                }
+                            }
+                        }
+                        div { class: "input-with-unit calculator-activity-field",
+                            input {
+                                value: "{activity}",
+                                inputmode: "decimal",
+                                oninput: move |event| activity.set(event.value())
+                            }
+                            span { class: "field-unit",
+                                if activity_in_mbq() { "МБк" } else { "ГБк" }
+                            }
+                        }
+                    }
+                    div { class: "calculator-time-fields",
+                        label {
+                            span { "Исходное время" }
+                            ManualTimeField {
+                                value: source_time(),
+                                oninput: move |value| source_time.set(value)
+                            }
+                        }
+                        label {
+                            span { "Время пересчёта" }
+                            ManualTimeField {
+                                value: target_time(),
+                                oninput: move |value| target_time.set(value)
+                            }
+                        }
+                    }
+                    div { class: "decay-calculator-result",
+                        span { "Результат" }
+                        if let Some(result) = decay_result {
+                            strong {
+                                if activity_in_mbq() {
+                                    "{format_activity_value(result)} МБк"
+                                } else {
+                                    "{format_activity_value(result)} ГБк"
+                                }
+                            }
+                            small {
+                                if activity_in_mbq() {
+                                    "{format_activity_value(result / 1000.0)} ГБк"
+                                } else {
+                                    "{format_activity_value(result * 1000.0)} МБк"
+                                }
+                            }
+                        } else {
+                            strong { "—" }
+                        }
+                    }
+                }
+            } else {
+                div { class: "standard-calculator",
+                    input {
+                        class: "calculator-display",
+                        value: "{display}",
+                        placeholder: "0",
+                        inputmode: "decimal",
+                        oninput: move |event| {
+                            display.set(event.value());
+                        }
+                    }
+                    div { class: "calculator-live-result",
+                        span { "Результат" }
+                        output {
+                            if let Some(result) = standard_result {
+                                "{format_activity_value(result)}"
+                            } else {
+                                "—"
+                            }
+                        }
+                    }
+                    div { class: "calculator-keypad",
+                        for key in ["C", "⌫", "÷", "×", "7", "8", "9", "−", "4", "5", "6", "+", "1", "2", "3", "=", "0", ","] {
+                            button {
+                                class: if key == "0" {
+                                    "calculator-zero"
+                                } else if ["÷", "×", "−", "+", "="].contains(&key) {
+                                    "operator"
+                                } else {
+                                    ""
+                                },
+                                onclick: {
+                                    let key = key.to_string();
+                                    move |_| {
+                                        match key.as_str() {
+                                            "C" => {
+                                                display.set(String::new());
+                                            }
+                                            "⌫" => {
+                                                let mut value = display();
+                                                value.pop();
+                                                display.set(value);
+                                            }
+                                            "÷" | "×" | "−" | "+" => {
+                                                let mut value = display().trim_end().to_string();
+                                                if !value.is_empty()
+                                                    && !matches!(
+                                                        value.chars().last(),
+                                                        Some('+' | '-' | '−' | '*' | '×' | '/' | '÷')
+                                                    )
+                                                {
+                                                    value.push(' ');
+                                                    value.push_str(&key);
+                                                    value.push(' ');
+                                                    display.set(value);
+                                                }
+                                            }
+                                            "=" => {
+                                                if let Some(result) =
+                                                    evaluate_calculator_expression(&display())
+                                                {
+                                                    display.set(format_activity_value(result));
+                                                }
+                                            }
+                                            digit => {
+                                                let mut value = display();
+                                                let digit = if digit == "," { "," } else { digit };
+                                                let current_number = value
+                                                    .rsplit(['+', '-', '−', '*', '×', '/', '÷'])
+                                                    .next()
+                                                    .unwrap_or_default();
+                                                if digit != ","
+                                                    || (!current_number.contains(',')
+                                                        && !current_number.contains('.'))
+                                                {
+                                                    value.push_str(digit);
+                                                }
+                                                display.set(value);
+                                            }
+                                        }
+                                    }
+                                },
+                                "{key}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn sanitize_print_title(value: &str) -> String {
     value
         .trim()
@@ -376,6 +717,8 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
     let mut activity_transfer_time = use_signal(|| initial_profile.activity_transfer_time);
     let mut consumers = use_signal(|| vec![Consumer::sampling(), Consumer::line_flush()]);
     let mut split_new_consumers = use_signal(|| false);
+    let mut compact_actual_fill = use_signal(|| false);
+    let mut show_activity_calculator = use_signal(|| false);
     let mut centers = use_signal(|| load_centers().unwrap_or_default());
     let mut target_count = use_signal(|| "2".to_string());
     let mut target_constant = use_signal(|| "8".to_string());
@@ -710,12 +1053,6 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                             requested_activity_gbq: consumer.activity.clone(),
                             actual_fill_time: consumer.actual_fill_time.clone(),
                             actual_fill_activity_mbq: consumer.actual_fill_activity_mbq.clone(),
-                            actual_at_filling_gbq: measured_activity_at_filling_time(
-                                &consumer.actual_fill_activity_mbq,
-                                &consumer.actual_fill_time,
-                                &filling_start.read(),
-                                isotope_half_life_minutes,
-                            ),
                             deviation: actual_fill_deviation(
                                 &consumer.activity,
                                 &consumer.requested_time,
@@ -848,6 +1185,22 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
         style { {REPORT_TITLE_STYLE} }
         style { {ACTUAL_FILL_STYLE} }
         style { {VERTICAL_PAGE_SCROLL_STYLE} }
+        style { {ACTUAL_FILL_COMPACT_STYLE} }
+        style { {ACTUAL_FILL_VIEW_TOGGLE_STYLE} }
+        style { {ACTIVITY_CALCULATOR_STYLE} }
+        style { {ACTIVITY_CALCULATOR_FIX_STYLE} }
+        style { {ACTIVITY_CALCULATOR_ANCHOR_STYLE} }
+        style { {CONSUMER_EDITOR_VISUAL_FIX_STYLE} }
+        style { {CONSUMER_BADGE_FOCUS_STYLE} }
+        style { {UNIFIED_CLOSE_BUTTON_STYLE} }
+        style { {CONSUMER_DROPDOWN_OVERFLOW_STYLE} }
+        style { {CONSUMER_INTERACTION_FIX_STYLE} }
+        style { {CROSS_BUTTON_FINAL_STYLE} }
+        style { {CROSS_AND_FOCUS_CORRECTION_STYLE} }
+        style { {STABLE_CONSUMER_TABLE_INTERACTION_STYLE} }
+        style { {TABLE_TAB_AND_EMPTY_STATE_FIX_STYLE} }
+        style { {TAB_TOOLS_AND_ACTUAL_WIDTH_STYLE} }
+        style { {COMPACT_TAB_CONTROLS_STYLE} }
         main { class: "shell", style: "{interface_theme_style}",
             header { class: "topbar",
                 div { class: "title-and-tabs",
@@ -1348,10 +1701,9 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                                 strong { "{total_series_volume_display}" }
                             }
                             td {
-                                class: "series-summary-side",
+                                class: "empty-series-summary",
                                 colspan: "3",
                                 rowspan: "2",
-                                span { "Итоги серии" }
                             }
                         } }
                         tr { class: if has_product_excess { "dilution-row excess-row" } else { "dilution-row" },
@@ -1371,14 +1723,118 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                                 h2 { "Контроль фактического налива" }
                                 p { "Отклонение рассчитывается по всей заявке на время заявки" }
                             }
-                            span { class: "actual-filling-time",
-                                span { "Время фасовки" }
-                                strong { "{filling_start}" }
+                            div { class: "actual-fill-heading-actions",
+                                button {
+                                    class: "secondary small actual-compact-toggle",
+                                    onclick: move |_| {
+                                        let next_value = !compact_actual_fill();
+                                        compact_actual_fill.set(next_value);
+                                    },
+                                    if compact_actual_fill() {
+                                        "Показать полный вариант таблицы"
+                                    } else {
+                                        "Показать компактный вариант таблицы"
+                                    }
+                                }
+                                span { class: "actual-filling-time",
+                                    span { "Время фасовки" }
+                                    strong { "{filling_start}" }
+                                }
+                                button {
+                                    class: if show_activity_calculator() {
+                                        "calculator-toggle active"
+                                    } else {
+                                        "calculator-toggle"
+                                    },
+                                    title: if show_activity_calculator() {
+                                        "Скрыть калькулятор"
+                                    } else {
+                                        "Показать калькулятор"
+                                    },
+                                    "aria-label": if show_activity_calculator() {
+                                        "Скрыть калькулятор"
+                                    } else {
+                                        "Показать калькулятор"
+                                    },
+                                    onclick: move |_| {
+                                        show_activity_calculator.set(!show_activity_calculator())
+                                    },
+                                    span { class: "calculator-toggle-icon", "123" }
+                                }
                             }
                         }
+                        div {
+                            class: if show_activity_calculator() {
+                                "actual-fill-content with-calculator"
+                            } else {
+                                "actual-fill-content"
+                            },
+                            div { class: "actual-fill-table-pane",
                         if actual_fill_groups.is_empty() {
                             div { class: "actual-fill-empty",
                                 "Добавьте реального потребителя, чтобы выполнить контроль налива."
+                            }
+                        } else if compact_actual_fill() {
+                            table { class: "actual-fill-table actual-fill-compact-view",
+                                thead { tr {
+                                    th { "Флакон" }
+                                    th { "Фактическая активность, МБк" }
+                                    th { "Время, ЧЧ:ММ" }
+                                    th { "Отклонение, ГБк / %" }
+                                } }
+                                tbody {
+                                    for group in actual_fill_groups.iter() {
+                                        for vial in group.vials.iter() {
+                                            tr {
+                                                td { class: "actual-vial-name",
+                                                    strong { "{vial.name}" }
+                                                }
+                                                td {
+                                                    div { class: "input-with-unit actual-activity-input",
+                                                        input {
+                                                            value: "{vial.actual_fill_activity_mbq}",
+                                                            oninput: {
+                                                                let consumer_index = vial.consumer_index;
+                                                                move |event| {
+                                                                    consumers.write()[consumer_index].actual_fill_activity_mbq =
+                                                                        event.value()
+                                                                }
+                                                            },
+                                                            onblur: {
+                                                                let consumer_index = vial.consumer_index;
+                                                                move |_| {
+                                                                    let formatted = {
+                                                                        let current = consumers.read();
+                                                                        format_activity(
+                                                                            &current[consumer_index].actual_fill_activity_mbq
+                                                                        )
+                                                                    };
+                                                                    if let Some(value) = formatted {
+                                                                        consumers.write()[consumer_index]
+                                                                            .actual_fill_activity_mbq = value;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        span { class: "field-unit", "МБк" }
+                                                    }
+                                                }
+                                                td {
+                                                    ManualTimeField {
+                                                        value: vial.actual_fill_time.clone(),
+                                                        oninput: {
+                                                            let consumer_index = vial.consumer_index;
+                                                            move |value| consumers.write()[consumer_index].actual_fill_time = value
+                                                        }
+                                                    }
+                                                }
+                                                td { class: "actual-result-cell",
+                                                    CompactActualDeviationResult { deviation: vial.deviation }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         } else {
                             table { class: "actual-fill-table",
@@ -1386,7 +1842,6 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                                     th { "Потребитель / флакон" }
                                     th { div { "Время измерения" } small { "ЧЧ:ММ" } }
                                     th { div { "Фактическая активность" } small { "МБк" } }
-                                    th { div { "Фактически к фасовке" } small { "ГБк" } }
                                     th { div { "Фактически ко времени заявки" } small { "ГБк" } }
                                     th { div { "Активность по заявке" } small { "ГБк" } }
                                     th { "Результат" }
@@ -1408,11 +1863,6 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                                                 },
                                                 td { class: "actual-vial-name",
                                                     strong { "{vial.name}" }
-                                                    if group.vials.len() > 1 {
-                                                        small {
-                                                            "План флакона: {format_activity(&vial.requested_activity_gbq).unwrap_or_else(|| \"—\".into())} ГБк"
-                                                        }
-                                                    }
                                                 }
                                                 td {
                                                     ManualTimeField {
@@ -1454,20 +1904,7 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                                                     }
                                                 }
                                                 td {
-                                                    if let Some(activity) = vial.actual_at_filling_gbq {
-                                                        strong { "{format_activity_value(activity)}" }
-                                                    } else {
-                                                        span { class: "actual-fill-pending-value", "—" }
-                                                    }
-                                                }
-                                                td {
-                                                    if let Some(deviation) = vial.deviation {
-                                                        strong {
-                                                            "{format_activity_value(deviation.actual_at_request_gbq)}"
-                                                        }
-                                                    } else {
-                                                        span { class: "actual-fill-pending-value", "—" }
-                                                    }
+                                                    ActualAtRequestBadge { deviation: vial.deviation }
                                                 }
                                                 td { class: "actual-request-cell",
                                                     strong {
@@ -1482,20 +1919,14 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                                         }
                                         if group.vials.len() > 1 {
                                             tr { class: "actual-group-total",
-                                                td { colspan: "4",
+                                                td { colspan: "3",
                                                     strong { "Итого по заявке «{group.name}»" }
                                                     span {
                                                         "{group.vials.len()} {vial_noun(group.vials.len())}"
                                                     }
                                                 }
                                                 td {
-                                                    if let Some(deviation) = group.deviation {
-                                                        strong {
-                                                            "{format_activity_value(deviation.actual_at_request_gbq)}"
-                                                        }
-                                                    } else {
-                                                        span { class: "actual-fill-pending-value", "—" }
-                                                    }
+                                                    ActualAtRequestBadge { deviation: group.deviation }
                                                 }
                                                 td { class: "actual-request-cell",
                                                     strong {
@@ -1512,9 +1943,14 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                                 }
                             }
                         }
-                    }
-                    div { class: "mock-note",
-                        "Активность пересчитана ко времени до синтеза по закону радиоактивного распада для {selected_isotope_name} (T½ {format_activity_value(isotope_half_life_minutes)} мин)."
+                            }
+                            if show_activity_calculator() {
+                                ActivityCalculator {
+                                    isotope_name: selected_isotope_name.clone(),
+                                    half_life_minutes: isotope_half_life_minutes
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1670,16 +2106,8 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                                 if let Ok(title) = load_saved_calculation_title(report_id) {
                                     props.on_rename_tab.call((props.tab_id, title));
                                 }
-                                let mut directory = centers.write();
-                                for consumer in consumers.read().iter() {
-                                    if !consumer.is_mandatory
-                                        && !consumer.name.trim().is_empty()
-                                        && !directory.iter().any(|name| {
-                                            name.eq_ignore_ascii_case(consumer.name.trim())
-                                        })
-                                    {
-                                        directory.push(consumer.name.clone());
-                                    }
+                                if let Ok(saved_centers) = load_centers() {
+                                    centers.set(saved_centers);
                                 }
                                 notice.set("Расчёт сохранён".into());
                                 show_save_report.set(false);
@@ -2425,3 +2853,19 @@ const PRINT_THEME_STYLE: &str = ".print-document{border:1px solid color-mix(in s
 const REPORT_TITLE_STYLE: &str = ".application-heading{display:flex;min-width:190px;max-width:310px;flex-direction:column;justify-content:center}.application-heading h1,.application-heading p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.application-heading .active-report-title{margin:3px 0 0;color:var(--interface-dark);font-weight:700}";
 const ACTUAL_FILL_STYLE: &str = ".actual-fill-section{min-width:980px;padding:18px 16px 22px;border-top:3px solid color-mix(in srgb,var(--interface-accent) 48%,#dce3ec);background:color-mix(in srgb,var(--interface-light) 16%,white)}.actual-fill-heading{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:12px}.actual-fill-heading h2{color:var(--interface-dark)}.actual-fill-heading p{margin:3px 0 0;color:#68778f;font-size:calc(12px + var(--font-increase))}.actual-filling-time{display:flex;align-items:center;gap:9px;padding:7px 11px;border:1px solid color-mix(in srgb,var(--interface-accent) 42%,#cbd5e1);border-radius:8px;background:var(--interface-light);color:var(--interface-dark)}.actual-filling-time span{font-size:calc(11px + var(--font-increase));font-weight:600}.actual-filling-time strong{font-size:calc(16px + var(--font-increase));font-variant-numeric:tabular-nums}.actual-fill-table{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:calc(13px + var(--font-increase));background:color-mix(in srgb,var(--interface-light) 8%,white);border:1px solid color-mix(in srgb,var(--interface-accent) 30%,#dce3ec);border-radius:9px;overflow:hidden}.actual-fill-table th,.actual-fill-table td{padding:8px;border-right:1px solid color-mix(in srgb,var(--interface-accent) 20%,#e5eaf0);border-bottom:1px solid color-mix(in srgb,var(--interface-accent) 20%,#e5eaf0);text-align:center;vertical-align:middle}.actual-fill-table th:last-child,.actual-fill-table td:last-child{border-right:0}.actual-fill-table tbody tr:last-child td{border-bottom:0}.actual-fill-table th{background:color-mix(in srgb,var(--interface-light) 72%,white);color:var(--interface-dark);font-size:calc(11px + var(--font-increase));text-transform:uppercase}.actual-fill-table th small{display:block;margin-top:3px;font-size:calc(10px + var(--font-increase));text-transform:none}.actual-fill-table th:nth-child(1){width:18%}.actual-fill-table th:nth-child(2){width:12%}.actual-fill-table th:nth-child(3){width:14%}.actual-fill-table th:nth-child(4){width:12%}.actual-fill-table th:nth-child(5){width:14%}.actual-fill-table th:nth-child(6){width:12%}.actual-fill-table th:nth-child(7){width:18%}.actual-fill-table input{height:calc(34px + var(--font-increase))!important;padding-top:5px!important;padding-bottom:5px!important}.actual-vial-name{text-align:left!important}.actual-vial-name strong,.actual-vial-name small{display:block}.actual-vial-name small{margin-top:3px;color:#68778f}.actual-vial-group td{background:color-mix(in srgb,var(--interface-light) 25%,white)}.actual-vial-first td{border-top:2px solid color-mix(in srgb,var(--interface-accent) 55%,#dce3ec)}.actual-vial-last td{border-bottom:2px solid color-mix(in srgb,var(--interface-accent) 55%,#dce3ec)}.actual-request-cell strong,.actual-request-cell small,.actual-request-cell span{display:block}.actual-request-cell strong{font-size:calc(15px + var(--font-increase));color:var(--interface-dark)}.actual-request-cell small{margin-top:3px;color:#68778f}.actual-request-cell span{margin-top:5px;color:var(--interface-dark);font-size:calc(10px + var(--font-increase));font-weight:700}.actual-result-badge{display:flex;flex-direction:column;align-items:center;gap:3px;padding:7px 9px;border-radius:8px;border:1px solid}.actual-result-badge.excess{background:#dcfce7;border-color:#86d7a8;color:#166534}.actual-result-badge.deficit{background:#fee2e2;border-color:#f3a6a6;color:#991b1b}.actual-result-badge span{font-variant-numeric:tabular-nums}.actual-comparison{display:block;margin-top:5px;color:#68778f;line-height:1.25}.actual-result-pending{display:inline-block;padding:6px 9px;border-radius:7px;background:#eef2f6;color:#68778f;font-weight:700}.actual-fill-pending-value{color:#98a2b3}.actual-fill-empty{padding:22px;border:1px dashed color-mix(in srgb,var(--interface-accent) 38%,#cbd5e1);border-radius:9px;text-align:center;color:#68778f}.actual-activity-input .field-unit{right:8px}.shell .actual-fill-table .time-menu{top:auto;bottom:100%;max-height:180px}";
 const VERTICAL_PAGE_SCROLL_STYLE: &str = "html,body,#main{height:auto!important;min-height:100%;overflow-x:hidden!important;overflow-y:auto!important}.shell{height:auto!important;min-height:100vh!important;overflow:visible!important}.workspace{height:auto!important;min-height:calc(100vh - 72px)!important;overflow:visible!important;align-items:start!important}.sidebar{height:auto!important;align-self:start}.results.panel{height:auto!important;min-height:calc(100vh - 100px)!important;overflow:visible!important}.results-table-scroll{flex:none!important;min-height:0!important;max-height:none!important;overflow-x:auto!important;overflow-y:visible!important;border:0!important;border-radius:0!important}.integrated-results-table{border:1px solid color-mix(in srgb,var(--interface-accent) 28%,#dce3ec);border-radius:8px}.integrated-results-table tfoot td{position:static!important}.actual-fill-section{min-width:1240px!important;margin-top:20px;padding:0 0 22px!important;border:0!important;background:transparent!important}.actual-fill-heading{padding:0 4px}.actual-group-total td{background:color-mix(in srgb,var(--interface-light) 68%,white)!important;border-top:2px solid var(--interface-accent)!important}.actual-group-total td:first-child{text-align:right!important}.actual-group-total td:first-child strong,.actual-group-total td:first-child span{display:inline-block}.actual-group-total td:first-child span{margin-left:10px;color:#68778f}.manual-time-field input{font-variant-numeric:tabular-nums}";
+const ACTUAL_FILL_COMPACT_STYLE: &str = ".actual-fill-table th{width:16.6667%!important}.actual-fill-table th,.actual-fill-table td{padding:5px 6px!important}.actual-fill-table input{height:30px!important;min-height:30px!important;padding-top:3px!important;padding-bottom:3px!important}.actual-fill-table .actual-vial-name{text-align:center!important}.actual-fill-table .actual-vial-name strong{font-size:calc(15px + var(--font-increase));line-height:1.2}.actual-fill-table .actual-result-badge{gap:1px;padding:4px 6px}.actual-fill-table .actual-comparison{margin-top:3px;font-size:calc(10px + var(--font-increase))}.actual-fill-table .actual-result-pending{padding:4px 7px}.actual-fill-table .actual-request-cell strong{font-size:calc(13px + var(--font-increase))}.actual-fill-table .actual-request-cell small{margin-top:1px}.actual-fill-table .time-field small{margin-top:2px}.integrated-results-table .empty-series-summary{background:color-mix(in srgb,var(--interface-light) 62%,white)!important;border-top-color:var(--interface-dark)!important}";
+const ACTUAL_FILL_VIEW_TOGGLE_STYLE: &str = ".actual-fill-heading-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}.actual-compact-toggle{white-space:nowrap}.actual-fill-compact-view th{width:25%!important}.actual-fill-compact-view th,.actual-fill-compact-view td{padding:2px 5px!important}.actual-fill-compact-view input{height:calc(26px + var(--font-increase))!important;min-height:calc(26px + var(--font-increase))!important;padding-top:1px!important;padding-bottom:1px!important}.actual-fill-compact-view .actual-vial-name{text-align:center!important}.actual-fill-compact-view .actual-result-badge{max-width:260px;margin:0 auto;padding:2px 6px;gap:0;line-height:1.15}.actual-fill-compact-view .actual-result-pending{padding:2px 6px}.actual-fill-compact-view .manual-time-field{max-width:180px;margin:0 auto}.actual-fill-compact-view .actual-activity-input{max-width:210px;margin:0 auto}.actual-at-request-badge{display:inline-block;min-width:64px;padding:4px 8px;border:1px solid;border-radius:999px;font-weight:700;font-variant-numeric:tabular-nums}.actual-at-request-badge.excess{background:#dcfce7;border-color:#86d7a8;color:#166534}.actual-at-request-badge.deficit{background:#fee2e2;border-color:#f3a6a6;color:#991b1b}@media(max-width:1100px){.actual-fill-heading{align-items:flex-start}.actual-fill-heading-actions{align-items:flex-end;flex-direction:column}}";
+const ACTIVITY_CALCULATOR_STYLE: &str = ".actual-fill-content{display:grid;grid-template-columns:minmax(0,3fr) minmax(270px,1fr);align-items:start;gap:14px}.actual-fill-table-pane{min-width:0;overflow-x:auto}.actual-fill-table-pane .actual-fill-table{min-width:860px}.actual-fill-table-pane .actual-fill-compact-view{min-width:650px}.activity-calculator{padding:12px;border:1px solid color-mix(in srgb,var(--interface-accent) 34%,#cbd5e1);border-radius:10px;background:color-mix(in srgb,var(--interface-light) 28%,white);color:var(--interface-dark);box-shadow:0 2px 8px color-mix(in srgb,var(--interface-dark) 8%,transparent)}.calculator-mode-switch{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:10px;padding:3px;border-radius:8px;background:color-mix(in srgb,var(--interface-light) 75%,white)}.calculator-mode-switch button{min-height:30px;padding:4px 7px;border:0;border-radius:6px;background:transparent;color:var(--interface-dark);font-size:calc(11px + var(--font-increase));font-weight:700}.calculator-mode-switch button.active{background:var(--interface-accent);color:var(--interface-on-accent);box-shadow:0 1px 4px color-mix(in srgb,var(--interface-dark) 18%,transparent)}.standard-calculator output{display:flex;align-items:center;justify-content:flex-end;min-height:44px;margin-bottom:8px;padding:6px 10px;overflow:hidden;border:1px solid color-mix(in srgb,var(--interface-accent) 28%,#cbd5e1);border-radius:8px;background:white;color:var(--interface-dark);font-size:calc(20px + var(--font-increase));font-weight:700;font-variant-numeric:tabular-nums}.calculator-keypad{display:grid;grid-template-columns:repeat(4,1fr);gap:5px}.calculator-keypad button{min-width:0;min-height:34px;padding:5px;border:1px solid color-mix(in srgb,var(--interface-accent) 25%,#cbd5e1);border-radius:7px;background:white;color:var(--interface-dark);font-size:calc(14px + var(--font-increase));font-weight:700}.calculator-keypad button:hover{background:var(--interface-light)}.calculator-keypad button.operator{background:color-mix(in srgb,var(--interface-accent) 18%,white);color:var(--interface-dark)}.calculator-keypad button.calculator-zero{grid-column:span 2}.decay-calculator{display:grid;gap:10px}.calculator-isotope{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border-radius:7px;background:var(--interface-light)}.calculator-isotope span{font-size:calc(10px + var(--font-increase));font-weight:600}.decay-calculator label>span{display:block;margin-bottom:4px;font-size:calc(11px + var(--font-increase));font-weight:700}.calculator-activity-field{display:grid;grid-template-columns:minmax(0,1fr) auto}.calculator-activity-field input{min-width:0;border-radius:7px 0 0 7px}.calculator-activity-field button{min-width:58px;padding:4px 7px;border:1px solid var(--interface-accent);border-radius:0 7px 7px 0;background:var(--interface-accent);color:var(--interface-on-accent);font-weight:700}.calculator-time-fields{display:grid;grid-template-columns:1fr 1fr;gap:7px}.activity-calculator input{height:calc(34px + var(--font-increase));font-size:calc(13px + var(--font-increase))}.activity-calculator .time-field small{display:none}.activity-calculator .time-menu{display:none}.decay-calculator-result{display:flex;min-height:68px;flex-direction:column;align-items:center;justify-content:center;padding:7px;border:1px solid color-mix(in srgb,var(--interface-accent) 40%,#cbd5e1);border-radius:8px;background:color-mix(in srgb,var(--interface-light) 58%,white);text-align:center}.decay-calculator-result>span{font-size:calc(10px + var(--font-increase));font-weight:700}.decay-calculator-result strong{margin-top:2px;font-size:calc(17px + var(--font-increase));font-variant-numeric:tabular-nums}.decay-calculator-result small{margin-top:2px;color:#68778f;font-weight:600}@media(max-width:1050px){.actual-fill-content{grid-template-columns:1fr}.activity-calculator{width:min(100%,420px)}}";
+const ACTIVITY_CALCULATOR_FIX_STYLE: &str = ".actual-fill-content{grid-template-columns:minmax(0,1fr)}.actual-fill-content.with-calculator{grid-template-columns:minmax(0,3fr) minmax(270px,1fr)}.activity-calculator{contain:layout;width:100%;min-width:0;height:370px;min-height:370px;max-height:370px;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable;align-self:start;box-sizing:border-box}.activity-calculator>*{width:100%;box-sizing:border-box}.calculator-toggle{display:grid;width:42px;height:42px;min-width:42px;padding:0;place-items:center;border:1px solid color-mix(in srgb,var(--interface-accent) 42%,#cbd5e1);border-radius:8px;background:var(--interface-light);color:var(--interface-dark)}.calculator-toggle:hover,.calculator-toggle.active{border-color:var(--interface-accent);background:var(--interface-accent);color:var(--interface-on-accent)}.calculator-toggle-icon{display:grid;width:25px;height:21px;place-items:center;border:2px solid currentColor;border-radius:4px;font-size:9px;font-weight:900;line-height:1}.calculator-mode-switch button{font-size:calc(13px + var(--font-increase))}.calculator-keypad button{font-size:calc(17px + var(--font-increase))}.standard-calculator .calculator-display{display:block;width:100%;height:44px!important;min-height:44px;margin-bottom:8px;padding:6px 10px!important;box-sizing:border-box;overflow:hidden;border:1px solid color-mix(in srgb,var(--interface-accent) 28%,#cbd5e1);border-radius:8px;background:white;color:var(--interface-dark);font-size:calc(20px + var(--font-increase));font-weight:700;text-align:right;font-variant-numeric:tabular-nums}.calculator-field-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}.calculator-field-heading>span{margin:0!important}.calculator-unit-switch{display:flex;gap:2px}.calculator-unit-switch button{min-height:23px;padding:2px 6px;border:1px solid color-mix(in srgb,var(--interface-accent) 34%,#cbd5e1);border-radius:5px;background:white;color:var(--interface-dark);font-size:calc(10px + var(--font-increase));font-weight:700}.calculator-unit-switch button.active{border-color:var(--interface-accent);background:var(--interface-accent);color:var(--interface-on-accent)}.calculator-activity-field{position:relative;display:block}.calculator-activity-field input{width:100%;min-width:0;padding-right:52px!important;border-radius:7px!important}.calculator-activity-field .field-unit{right:10px;pointer-events:none}@media(max-width:1050px){.actual-fill-content.with-calculator{grid-template-columns:1fr}.activity-calculator{width:min(100%,420px);justify-self:end}}";
+const ACTIVITY_CALCULATOR_ANCHOR_STYLE: &str = ".actual-fill-content.with-calculator{position:relative;display:block;min-height:370px}.actual-fill-content.with-calculator .actual-fill-table-pane{width:calc(75% - 7px)}.actual-fill-content.with-calculator .activity-calculator{position:absolute;top:0;right:0;width:calc(25% - 7px);margin:0;overflow-y:scroll;scrollbar-width:none}.actual-fill-content.with-calculator .activity-calculator::-webkit-scrollbar{width:0;height:0}.calculator-live-result{display:flex;min-height:47px;align-items:flex-end;justify-content:space-between;gap:8px;margin:-3px 0 8px;padding:4px 8px;border-bottom:1px solid color-mix(in srgb,var(--interface-accent) 32%,#cbd5e1)}.calculator-live-result>span{padding-bottom:3px;color:#68778f;font-size:calc(10px + var(--font-increase));font-weight:700}.standard-calculator .calculator-live-result output{display:block;min-width:0;min-height:0;margin:0;padding:0;overflow:hidden;border:0;border-radius:0;background:transparent;color:var(--interface-dark);font-size:calc(21px + var(--font-increase));font-weight:800;text-align:right;font-variant-numeric:tabular-nums}@media(max-width:1050px){.actual-fill-content.with-calculator{display:grid;min-height:0}.actual-fill-content.with-calculator .actual-fill-table-pane{width:100%}.actual-fill-content.with-calculator .activity-calculator{position:static;width:min(100%,420px);margin:0;justify-self:end}}";
+const CONSUMER_EDITOR_VISUAL_FIX_STYLE: &str = ".consumer-editor td:last-child{text-align:center}.consumer-editor td:last-child .remove,.integrated-results-table .consumer-name-cell .remove{display:grid;width:32px;height:32px;min-width:32px;min-height:32px;margin:auto;padding:0!important;place-items:center;border:1px solid color-mix(in srgb,#b42318 32%,#dce3ec);border-radius:8px;background:color-mix(in srgb,#fee2e2 42%,white);color:#a33a3a;font-size:calc(18px + var(--font-increase));line-height:1}.consumer-editor td:last-child .remove:hover,.integrated-results-table .consumer-name-cell .remove:hover{border-color:#b42318;background:#fee2e2;color:#991b1b}.vial-group-first td.request-group{position:relative}.vial-group-first .vial-group-label{z-index:100;top:-1px;transform:translate(-50%,-62%);border:1px solid color-mix(in srgb,var(--interface-accent) 58%,#dce3ec);background:color-mix(in srgb,var(--interface-accent) 24%,white);color:var(--interface-dark);box-shadow:0 1px 3px color-mix(in srgb,var(--interface-dark) 14%,transparent)}.vial-group-first .vial-original-activity{position:absolute;z-index:100;top:-1px;left:50%;display:inline-block;margin:0;padding:3px 9px;transform:translate(-50%,-62%);border-color:color-mix(in srgb,var(--interface-accent) 58%,#dce3ec);background:color-mix(in srgb,var(--interface-accent) 24%,white);color:var(--interface-dark);font-weight:500;line-height:1.1;box-shadow:0 1px 3px color-mix(in srgb,var(--interface-dark) 14%,transparent)}";
+const CONSUMER_BADGE_FOCUS_STYLE: &str = ".vial-group-first .vial-group-label,.vial-group-first .vial-original-activity{transition:opacity .12s ease}.vial-group-first:has(.consumer-picker:focus-within) .vial-group-label,.vial-group-first:has(.consumer-picker:focus-within) .vial-original-activity{opacity:0;pointer-events:none}";
+const UNIFIED_CLOSE_BUTTON_STYLE: &str = ".shell .close,.shell .remove,.shell .report-delete,.shell .toast-close,.shell .tab-close{display:grid;place-items:center;aspect-ratio:1;padding:0!important;border-radius:8px;line-height:1;text-align:center;font-family:Arial,sans-serif}.shell .close,.shell .remove,.shell .report-delete,.shell .toast-close{width:32px;height:32px;min-width:32px;min-height:32px}.shell .tab-close{width:26px;height:26px;min-width:26px;min-height:26px;border-radius:7px}.shell .close{border:1px solid color-mix(in srgb,#b42318 28%,#dce3ec);background:color-mix(in srgb,#fee2e2 35%,transparent);color:#a33a3a}.shell .close:hover{border-color:#b42318;background:#fee2e2;color:#991b1b}.shell .toast-close{border:1px solid color-mix(in srgb,white 42%,transparent);background:color-mix(in srgb,white 10%,transparent);color:white}.shell .toast-close:hover{background:color-mix(in srgb,white 22%,transparent);color:white}.shell .report-delete{border:1px solid color-mix(in srgb,#b42318 32%,#dce3ec);background:color-mix(in srgb,#fee2e2 42%,white);color:#a33a3a}.shell .tab-close{border:1px solid transparent}.shell .tab-close:hover{border-color:#dc2626;background:#dc2626!important;color:white!important}";
+const CONSUMER_DROPDOWN_OVERFLOW_STYLE: &str = ".results:has(.integrated-results-table .consumer-picker:focus-within),.results-table-scroll:has(.consumer-picker:focus-within){overflow:visible!important}.results-table-scroll:has(.consumer-picker:focus-within){border-color:transparent!important}.integrated-results-table:has(.consumer-picker:focus-within){position:relative;z-index:1000000}.integrated-results-table .consumer-menu{contain:layout paint}";
+const CONSUMER_INTERACTION_FIX_STYLE: &str = ".results:has(.integrated-results-table .time-field:focus-within),.results-table-scroll:has(.time-field:focus-within){overflow:visible!important}.results-table-scroll:has(.time-field:focus-within){border-color:transparent!important}.integrated-results-table:has(.time-field:focus-within){position:relative;z-index:1000000}.integrated-results-table .time-menu{contain:layout paint;z-index:1000001}.integrated-results-table tbody td{border-bottom-width:2px!important}.vial-group-first:focus-within .vial-group-label,.vial-group-first:focus-within .vial-original-activity,tr:focus-within+.vial-group-first .vial-group-label,tr:focus-within+.vial-group-first .vial-original-activity{opacity:0;pointer-events:none}.shell .close,.shell .remove,.shell .report-delete,.shell .toast-close,.shell .tab-close{font-size:0!important}.shell .close::before,.shell .remove::before,.shell .report-delete::before,.shell .toast-close::before,.shell .tab-close::before{content:'×';display:block;font-family:Arial,sans-serif;font-size:20px;font-weight:400;line-height:1;transform:translateY(-1px)}.shell .tab-close::before{font-size:18px}.shell .close,.shell .remove,.shell .report-delete,.shell .toast-close{width:32px!important;height:32px!important;min-width:32px!important;min-height:32px!important;border-radius:8px!important}.shell .tab-close{width:28px!important;height:28px!important;min-width:28px!important;min-height:28px!important;margin:2px;border-radius:8px!important}";
+const CROSS_BUTTON_FINAL_STYLE: &str = ".close,.remove,.report-delete,.toast-close,.tab-close{display:flex!important;width:32px!important;height:32px!important;min-width:32px!important;min-height:32px!important;align-items:center!important;justify-content:center!important;aspect-ratio:1;padding:0!important;border:1px solid color-mix(in srgb,#b42318 32%,#dce3ec)!important;border-radius:8px!important;background:color-mix(in srgb,#fee2e2 42%,white)!important;color:#a33a3a!important;font-family:Arial,sans-serif!important;font-size:18px!important;font-weight:400!important;line-height:1!important;text-align:center!important;transform:none!important}.close::before,.remove::before,.report-delete::before,.toast-close::before,.tab-close::before{content:none!important;display:none!important}.close:hover,.remove:hover,.report-delete:hover,.toast-close:hover,.tab-close:hover{border-color:#b42318!important;background:#fee2e2!important;color:#991b1b!important}.tab-close{margin:2px!important}.calculation-tab.active .tab-close{border-color:color-mix(in srgb,white 46%,transparent)!important;background:color-mix(in srgb,white 14%,transparent)!important;color:var(--interface-on-accent)!important}.calculation-tab.active .tab-close:hover{border-color:#dc2626!important;background:#dc2626!important;color:white!important}.info-toast .toast-close{border-color:color-mix(in srgb,white 42%,transparent)!important;background:color-mix(in srgb,white 10%,transparent)!important;color:white!important}.info-toast .toast-close:hover{background:color-mix(in srgb,white 22%,transparent)!important;color:white!important}";
+const CROSS_AND_FOCUS_CORRECTION_STYLE: &str = ".shell .integrated-results-table .remove,.shell .calculation-tab .tab-close{display:flex!important;align-items:center!important;justify-content:center!important;font-family:Arial,sans-serif!important;font-size:18px!important;font-weight:400!important;line-height:1!important;color:#a33a3a!important}.shell .integrated-results-table .remove::before,.shell .calculation-tab .tab-close::before{content:none!important;display:none!important}.shell .calculation-tab.active .tab-close,.shell .calculation-tab:not(.active) .tab-close{border-color:color-mix(in srgb,#b42318 32%,#dce3ec)!important;background:color-mix(in srgb,#fee2e2 76%,white)!important;color:#a33a3a!important}.shell .calculation-tab .tab-close:hover{border-color:#dc2626!important;background:#dc2626!important;color:white!important}.shell .results-table-scroll:has(.consumer-picker:focus-within),.shell .results-table-scroll:has(.time-field:focus-within){border:0!important;border-radius:0!important}";
+const STABLE_CONSUMER_TABLE_INTERACTION_STYLE: &str = ".shell .results:has(.integrated-results-table .consumer-picker:focus-within),.shell .results:has(.integrated-results-table .time-field:focus-within){overflow-x:auto!important;overflow-y:visible!important}.shell .results-table-scroll:has(.consumer-picker:focus-within),.shell .results-table-scroll:has(.time-field:focus-within){overflow-x:auto!important;overflow-y:visible!important;border:0!important;border-radius:0!important}.integrated-results-table{border-collapse:separate!important;border-spacing:0!important}.integrated-results-table .consumer-picker:focus-within,.integrated-results-table .time-field:focus-within{anchor-name:--active-consumer-field}.integrated-results-table .consumer-menu,.integrated-results-table .time-menu{position:fixed!important;position-anchor:--active-consumer-field;top:anchor(bottom)!important;right:auto!important;bottom:auto!important;left:anchor(left)!important;width:anchor-size(width);min-width:180px;margin-top:5px;position-try-fallbacks:flip-block;z-index:2147483000!important}.integrated-results-table .consumer-menu{min-width:250px}";
+const TABLE_TAB_AND_EMPTY_STATE_FIX_STYLE: &str = ".integrated-results-table{border-collapse:collapse!important;border-spacing:0!important}.integrated-results-table tbody td{border-bottom-width:1px!important}.integrated-results-table .request-group{border-top-width:2px!important;border-bottom-width:2px!important}.integrated-results-table td:has(.consumer-picker:focus-within),.integrated-results-table tr:has(.consumer-picker:focus-within),.integrated-results-table td:has(.time-field:focus-within),.integrated-results-table tr:has(.time-field:focus-within){position:static!important;z-index:auto!important}.calculation-tab,.calculation-tab.active,.calculation-tab:not(.active){font-weight:700!important;line-height:1.2!important}.calculation-tab .tab-title{min-height:32px;display:flex;align-items:center;font-weight:700!important;line-height:1.2!important;letter-spacing:0!important}.calculation-tab .tab-edit,.calculation-tab .tab-close{flex:0 0 32px;width:32px!important;min-width:32px!important;height:32px!important;min-height:32px!important;margin:0!important}.actual-fill-content:not(.with-calculator),.actual-fill-content:not(.with-calculator) .actual-fill-table-pane{display:block;width:100%!important}.actual-fill-empty{display:flex;width:100%;min-height:82px;align-items:center;justify-content:center;border:2px dashed color-mix(in srgb,var(--interface-accent) 38%,#cbd5e1);background:color-mix(in srgb,var(--interface-light) 16%,white)}";
+const TAB_TOOLS_AND_ACTUAL_WIDTH_STYLE: &str = ".shell .calculation-tab .tab-close{font-size:14px!important}.shell .calculation-tab .tab-edit{display:flex!important;flex:0 0 32px;width:32px!important;height:32px!important;min-width:32px!important;min-height:32px!important;align-items:center!important;justify-content:center!important;margin:0!important;padding:0!important;border:1px solid color-mix(in srgb,var(--interface-accent) 30%,#dce3ec)!important;border-radius:8px!important;background:color-mix(in srgb,var(--interface-light) 66%,white)!important;color:var(--interface-dark)!important;font-family:'Segoe UI Symbol','Segoe UI',sans-serif!important;font-size:15px!important;font-weight:500!important;line-height:1!important}.shell .calculation-tab .tab-edit:hover{border-color:var(--interface-accent)!important;background:var(--interface-light)!important;color:var(--interface-dark)!important}.actual-fill-section,.actual-fill-empty{width:100%!important;max-width:none!important;box-sizing:border-box}.actual-fill-content:not(.with-calculator),.actual-fill-content:not(.with-calculator) .actual-fill-table-pane{display:block!important;width:100%!important;max-width:none!important;box-sizing:border-box}.actual-fill-content.with-calculator .actual-fill-table-pane{width:calc(75% - 7px)!important}.actual-fill-content.with-calculator .activity-calculator{width:calc(25% - 7px)!important}@media(max-width:1050px){.actual-fill-content.with-calculator .actual-fill-table-pane{width:100%!important}.actual-fill-content.with-calculator .activity-calculator{width:min(100%,420px)!important}}";
+const COMPACT_TAB_CONTROLS_STYLE: &str = ".shell .calculation-tab .tab-edit,.shell .calculation-tab .tab-close{display:flex!important;flex:0 0 22px!important;width:22px!important;height:22px!important;min-width:22px!important;min-height:22px!important;align-items:center!important;justify-content:center!important;margin:0 2px 0 0!important;padding:0!important;border-radius:6px!important;line-height:1!important}.shell .calculation-tab .tab-close{border:1px solid color-mix(in srgb,#b42318 36%,#dce3ec)!important;background:color-mix(in srgb,#fee2e2 66%,white)!important;color:#a33a3a!important;font-size:12px!important}.shell .calculation-tab .tab-edit{border:1px solid var(--interface-dark)!important;background:var(--interface-dark)!important;color:white!important;font-family:'Segoe UI Symbol','Segoe UI',sans-serif!important;font-size:13px!important;font-weight:500!important}.shell .calculation-tab .tab-edit:hover{border-color:var(--interface-accent)!important;background:var(--interface-accent)!important;color:var(--interface-on-accent)!important}.shell .calculation-tab .tab-close:hover{border-color:#dc2626!important;background:#dc2626!important;color:white!important}.shell .calculation-tab.active .tab-edit{border-color:color-mix(in srgb,white 50%,var(--interface-dark))!important;background:color-mix(in srgb,var(--interface-dark) 78%,black)!important;color:white!important}.shell .calculation-tab.active .tab-close{border-color:color-mix(in srgb,#fee2e2 58%,white)!important;background:color-mix(in srgb,#fee2e2 82%,white)!important;color:#991b1b!important}";
