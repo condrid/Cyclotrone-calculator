@@ -41,7 +41,7 @@ impl Consumer {
     pub(crate) fn sampling() -> Self {
         Self {
             name: "Отбор проб".into(),
-            activity: String::new(),
+            activity: "7,00".into(),
             requested_time: String::new(),
             is_mandatory: true,
             split_into_vials: false,
@@ -79,7 +79,7 @@ impl Consumer {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub(crate) struct DrugProfile {
     pub(crate) isotope_id: Option<i64>,
@@ -114,6 +114,7 @@ mod tests {
         let consumer = Consumer::sampling();
 
         assert_eq!(consumer.name, "Отбор проб");
+        assert_eq!(consumer.activity, "7,00");
         assert!(consumer.is_mandatory);
     }
 

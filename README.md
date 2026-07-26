@@ -30,7 +30,7 @@ cargo build --release
 Готовый исполняемый файл появится в:
 
 ```text
-target/release/dioxus_windows_form.exe
+target/release/cyclcalc.exe
 ```
 
 ## Автоматическая сборка Windows
@@ -57,7 +57,7 @@ SHA-256.
 
 ```text
 папка программы/
-├── dioxus_windows_form.exe
+├── cyclcalc.exe
 └── data/
     └── calculator.sqlite3
 ```

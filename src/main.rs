@@ -1,4 +1,4 @@
-#![cfg_attr(feature = "bundle", windows_subsystem = "windows")]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod app;
 mod calculations;

@@ -5,6 +5,8 @@ use crate::calculations::F18_HALF_LIFE_MINUTES;
 use crate::models::{Consumer, DrugListItem, DrugProfile, Isotope};
 use crate::storage::database_path;
 
+const DATABASE_SCHEMA_VERSION: i64 = 1;
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct CalculationSettings {
@@ -38,12 +40,12 @@ impl Default for CalculationSettings {
             "F-18",
             F18_HALF_LIFE_MINUTES,
             "6",
-            "04:30",
-            "95",
-            "",
+            "05:30",
+            "70",
+            "15",
             "22",
-            "0",
-            "0",
+            "22",
+            "10",
             "—",
             "11",
             "—",
@@ -58,6 +60,16 @@ pub(crate) struct SavedCalculationSummary {
     pub(crate) drug_name: String,
     pub(crate) report_title: String,
     pub(crate) consumer_count: usize,
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct StartupData {
+    pub(crate) interface_color: String,
+    pub(crate) interface_font_step: u8,
+    pub(crate) isotopes: Vec<Isotope>,
+    pub(crate) drugs: Vec<DrugListItem>,
+    pub(crate) initial_profile: DrugProfile,
+    pub(crate) centers: Vec<String>,
 }
 
 pub(crate) struct SavedCalculation {
@@ -111,26 +123,78 @@ impl CalculationSettings {
     }
 }
 
-pub(crate) fn initialize_database() -> rusqlite::Result<()> {
+pub(crate) fn load_startup_data() -> rusqlite::Result<StartupData> {
     let path = database_path()?;
     let is_new_database = !path.exists();
-    let connection = open_connection()?;
+    let connection = Connection::open(path)?;
     initialize_schema(&connection)?;
     seed_isotopes(&connection)?;
+    seed_standard_drugs(&connection, is_new_database)?;
+
+    let interface_color = query_interface_color(&connection)?;
+    let interface_font_step = query_interface_font_step(&connection)?;
+    let isotopes = query_isotopes(&connection)?;
+    let drugs = query_drugs(&connection)?;
+    let initial_profile = drugs
+        .first()
+        .map(|drug| query_drug_profile(&connection, drug.id))
+        .transpose()?
+        .flatten()
+        .unwrap_or_default();
+    let centers = query_centers(&connection)?;
+
+    Ok(StartupData {
+        interface_color,
+        interface_font_step,
+        isotopes,
+        drugs,
+        initial_profile,
+        centers,
+    })
+}
+
+fn seed_standard_drugs(connection: &Connection, is_new_database: bool) -> rusqlite::Result<()> {
+    let f18_id = connection.query_row("SELECT id FROM isotopes WHERE code = 'f18'", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    let fdg_profile = DrugProfile {
+        isotope_id: Some(f18_id),
+        radiochemical_yield: "70".into(),
+        maximum_vial_volume: "15".into(),
+        semi_product_volume: "22".into(),
+        synthesis_time: "22".into(),
+        activity_transfer_time: "10".into(),
+    };
+    let fdg_settings = to_json(&fdg_profile)?;
+
     if is_new_database {
-        for (code, name) in [("fdg", "F-18 FDG"), ("tc99m", "Tc-99m")] {
-            connection.execute(
-                "INSERT INTO drug_types (code, name, settings_json) VALUES (?1, ?2, ?3)",
-                params![code, name, "{}"],
-            )?;
-        }
+        connection.execute(
+            "INSERT INTO drug_types (code, name, settings_json) VALUES ('fdg', 'FDG', ?1)",
+            [&fdg_settings],
+        )?;
+        connection.execute(
+            "INSERT INTO drug_types (code, name, settings_json)
+             VALUES ('tc99m', 'Tc-99m', '{}')",
+            [],
+        )?;
+    } else {
+        connection.execute(
+            "UPDATE drug_types
+             SET name = 'FDG'
+             WHERE code = 'fdg' AND name = 'F-18 FDG'",
+            [],
+        )?;
+        connection.execute(
+            "UPDATE drug_types
+             SET settings_json = ?1
+             WHERE code = 'fdg' AND name = 'FDG' AND settings_json = '{}'",
+            [&fdg_settings],
+        )?;
     }
     Ok(())
 }
 
-pub(crate) fn load_interface_color() -> rusqlite::Result<String> {
-    let connection = open_connection()?;
-    initialize_schema(&connection)?;
+fn query_interface_color(connection: &Connection) -> rusqlite::Result<String> {
     Ok(connection
         .query_row(
             "SELECT value FROM app_settings WHERE key = 'interface_color'",
@@ -152,7 +216,6 @@ pub(crate) fn save_interface_color(color: &str) -> rusqlite::Result<()> {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
     connection.execute(
         "INSERT INTO app_settings (key, value) VALUES ('interface_color', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -161,9 +224,7 @@ pub(crate) fn save_interface_color(color: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-pub(crate) fn load_interface_font_step() -> rusqlite::Result<u8> {
-    let connection = open_connection()?;
-    initialize_schema(&connection)?;
+fn query_interface_font_step(connection: &Connection) -> rusqlite::Result<u8> {
     let value = connection
         .query_row(
             "SELECT value FROM app_settings WHERE key = 'interface_font_step'",
@@ -180,7 +241,6 @@ pub(crate) fn save_interface_font_step(step: u8) -> rusqlite::Result<()> {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
     connection.execute(
         "INSERT INTO app_settings (key, value) VALUES ('interface_font_step', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -191,8 +251,10 @@ pub(crate) fn save_interface_font_step(step: u8) -> rusqlite::Result<()> {
 
 pub(crate) fn load_isotopes() -> rusqlite::Result<Vec<Isotope>> {
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
-    seed_isotopes(&connection)?;
+    query_isotopes(&connection)
+}
+
+fn query_isotopes(connection: &Connection) -> rusqlite::Result<Vec<Isotope>> {
     let mut statement =
         connection.prepare("SELECT id, code, name, half_life_minutes FROM isotopes ORDER BY id")?;
     let rows = statement.query_map([], |row| {
@@ -210,7 +272,6 @@ pub(crate) fn load_isotopes() -> rusqlite::Result<Vec<Isotope>> {
 
 pub(crate) fn save_isotope(isotope: &Isotope) -> rusqlite::Result<i64> {
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
     let half_life = isotope
         .half_life_minutes
         .trim()
@@ -244,7 +305,6 @@ pub(crate) fn save_calculation(
     report_name: Option<&str>,
 ) -> rusqlite::Result<i64> {
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
     save_consumer_centers(&connection, consumers)?;
 
     let constants_json = to_json(settings)?;
@@ -267,7 +327,6 @@ pub(crate) fn update_calculation(
     report_name: Option<&str>,
 ) -> rusqlite::Result<()> {
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
     save_consumer_centers(&connection, consumers)?;
     let updated = connection.execute(
         "UPDATE calculations
@@ -291,14 +350,12 @@ pub(crate) fn update_calculation(
 
 pub(crate) fn delete_saved_calculation(id: i64) -> rusqlite::Result<()> {
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
     connection.execute("DELETE FROM calculations WHERE id = ?1", [id])?;
     Ok(())
 }
 
 pub(crate) fn save_drug_profile(name: &str, profile: &DrugProfile) -> rusqlite::Result<i64> {
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
     let code = format!("custom:{}", name.trim().to_lowercase());
     let settings_json = to_json(profile)?;
     connection.execute(
@@ -314,7 +371,6 @@ pub(crate) fn update_drug_profile(
     profile: &DrugProfile,
 ) -> rusqlite::Result<()> {
     let mut connection = open_connection()?;
-    initialize_schema(&connection)?;
     let settings_json = to_json(profile)?;
     let transaction = connection.transaction()?;
     let updated = transaction.execute(
@@ -333,7 +389,6 @@ pub(crate) fn update_drug_profile(
 
 pub(crate) fn delete_drug(id: i64) -> rusqlite::Result<()> {
     let mut connection = open_connection()?;
-    initialize_schema(&connection)?;
     let transaction = connection.transaction()?;
     transaction.execute("DELETE FROM calculations WHERE drug_id = ?1", [id])?;
     transaction.execute("DELETE FROM drug_types WHERE id = ?1", [id])?;
@@ -342,7 +397,10 @@ pub(crate) fn delete_drug(id: i64) -> rusqlite::Result<()> {
 
 pub(crate) fn load_drug_profile(id: i64) -> rusqlite::Result<Option<DrugProfile>> {
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
+    query_drug_profile(&connection, id)
+}
+
+fn query_drug_profile(connection: &Connection, id: i64) -> rusqlite::Result<Option<DrugProfile>> {
     let settings = connection
         .query_row(
             "SELECT settings_json FROM drug_types WHERE id = ?1",
@@ -360,9 +418,7 @@ pub(crate) fn load_drug_profile(id: i64) -> rusqlite::Result<Option<DrugProfile>
         .transpose()
 }
 
-pub(crate) fn load_drugs() -> rusqlite::Result<Vec<DrugListItem>> {
-    let connection = open_connection()?;
-    initialize_schema(&connection)?;
+fn query_drugs(connection: &Connection) -> rusqlite::Result<Vec<DrugListItem>> {
     let mut statement = connection.prepare("SELECT id, name FROM drug_types ORDER BY id")?;
     let rows = statement.query_map([], |row| {
         Ok(DrugListItem {
@@ -375,7 +431,10 @@ pub(crate) fn load_drugs() -> rusqlite::Result<Vec<DrugListItem>> {
 
 pub(crate) fn load_centers() -> rusqlite::Result<Vec<String>> {
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
+    query_centers(&connection)
+}
+
+fn query_centers(connection: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut statement = connection.prepare(
         "SELECT name FROM centers
          WHERE is_active = 1
@@ -433,7 +492,6 @@ fn save_consumer_centers(connection: &Connection, consumers: &[Consumer]) -> rus
 
 pub(crate) fn count_saved_calculations() -> rusqlite::Result<usize> {
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
     connection.query_row("SELECT COUNT(*) FROM calculations", [], |row| row.get(0))
 }
 
@@ -442,7 +500,6 @@ pub(crate) fn load_saved_calculation_page(
     offset: usize,
 ) -> rusqlite::Result<Vec<SavedCalculationSummary>> {
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
     let mut statement = connection.prepare(
         "SELECT id, calculated_at, drug_type, inputs_json,
                 COALESCE(NULLIF(report_name, ''), drug_type || ' ' || calculated_at)
@@ -478,7 +535,6 @@ pub(crate) fn load_saved_calculation_page(
 
 pub(crate) fn load_saved_calculation(id: i64) -> rusqlite::Result<SavedCalculation> {
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
     let (drug_id, drug_name, constants_json, inputs_json, report_name) = connection.query_row(
         "SELECT drug_id, drug_type, constants_json, inputs_json, report_name
          FROM calculations WHERE id = ?1",
@@ -504,7 +560,6 @@ pub(crate) fn load_saved_calculation(id: i64) -> rusqlite::Result<SavedCalculati
 
 pub(crate) fn load_saved_calculation_title(id: i64) -> rusqlite::Result<String> {
     let connection = open_connection()?;
-    initialize_schema(&connection)?;
     connection.query_row(
         "SELECT COALESCE(NULLIF(report_name, ''), drug_type || ' ' || calculated_at)
          FROM calculations WHERE id = ?1",
@@ -551,7 +606,13 @@ fn initialize_schema(connection: &Connection) -> rusqlite::Result<()> {
         );",
     )?;
 
-    migrate_drug_identity(connection)
+    let current_version =
+        connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+    if current_version < DATABASE_SCHEMA_VERSION {
+        migrate_drug_identity(connection)?;
+        connection.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
+    }
+    Ok(())
 }
 
 fn seed_isotopes(connection: &Connection) -> rusqlite::Result<()> {
@@ -688,6 +749,10 @@ mod tests {
             })
             .expect("migrated calculation");
         assert_eq!(linked_id, Some(1));
+        let schema_version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(schema_version, DATABASE_SCHEMA_VERSION);
     }
 
     #[test]
@@ -717,6 +782,30 @@ mod tests {
         assert_eq!(count, 14);
         assert!((f18_half_life - 109.77).abs() < f64::EPSILON);
         assert!((c11_half_life - 20.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn seeds_fdg_with_production_defaults() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        initialize_schema(&connection).expect("schema");
+        seed_isotopes(&connection).expect("isotope seed");
+        seed_standard_drugs(&connection, true).expect("drug seed");
+
+        let (name, settings): (String, String) = connection
+            .query_row(
+                "SELECT name, settings_json FROM drug_types WHERE code = 'fdg'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("FDG");
+        let profile: DrugProfile = serde_json::from_str(&settings).expect("FDG settings");
+
+        assert_eq!(name, "FDG");
+        assert_eq!(profile.radiochemical_yield, "70");
+        assert_eq!(profile.maximum_vial_volume, "15");
+        assert_eq!(profile.synthesis_time, "22");
+        assert_eq!(profile.activity_transfer_time, "10");
+        assert!(profile.isotope_id.is_some());
     }
 
     #[test]

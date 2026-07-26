@@ -1,11 +1,11 @@
 [application]
-name = "dioxus_windows_form"
+name = "cyclcalc"
 
 [web.app]
 title = "Форма Dioxus"
 
 [bundle]
-identifier = "com.example.dioxuswindowsform"
-publisher = "Example"
+identifier = "ru.cyclcalc.desktop"
+publisher = "cyclcalc"
 short_description = "Простое desktop-приложение на Dioxus"
 category = "Utility"
