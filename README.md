@@ -33,6 +33,23 @@ cargo build --release
 target/release/dioxus_windows_form.exe
 ```
 
+## Автоматическая сборка Windows
+
+Каждое изменение ветки `main` автоматически проходит тесты и собирается на
+GitHub Actions. Готовый `Cyclotrone-calculator.exe` доступен в артефакте
+`Cyclotrone-calculator-Windows` соответствующего запуска workflow.
+
+Для публикации стабильной версии в разделе GitHub Releases нужно создать и
+отправить тег, совпадающий с версией из `Cargo.toml`:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+К релизу автоматически прикладываются исполняемый файл и его контрольная сумма
+SHA-256.
+
 ## Переносимое хранение данных
 
 При запуске приложение создаёт каталог `data` рядом с исполняемым файлом:
