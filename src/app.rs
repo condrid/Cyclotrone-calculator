@@ -2,7 +2,9 @@ use dioxus::prelude::*;
 use palette::{Mix, Srgb};
 
 use crate::calculations::*;
-use crate::components::{ConsumerPicker, Field, PickerOption, SelectPicker, TimeField, UnitField};
+use crate::components::{
+    ConsumerPicker, Field, ManualTimeField, PickerOption, SelectPicker, TimeField, UnitField,
+};
 use crate::database::{
     count_saved_calculations, delete_drug, delete_saved_calculation, initialize_database,
     load_centers, load_drug_profile, load_drugs, load_interface_color, load_interface_font_step,
@@ -172,6 +174,7 @@ struct ActualFillVialView {
     actual_fill_time: String,
     actual_fill_activity_mbq: String,
     actual_at_filling_gbq: Option<f64>,
+    deviation: Option<ActualFillDeviation>,
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -256,6 +259,38 @@ fn format_deviation_percent(value: f64) -> String {
         ""
     };
     format!("{sign}{}%", format_activity_value(value.abs()))
+}
+
+#[component]
+fn ActualDeviationResult(deviation: Option<ActualFillDeviation>) -> Element {
+    rsx! {
+        if let Some(deviation) = deviation {
+            div {
+                class: if deviation.deviation_at_request_gbq < 0.0 {
+                    "actual-result-badge deficit"
+                } else {
+                    "actual-result-badge excess"
+                },
+                strong {
+                    if deviation.deviation_at_request_gbq < 0.0 {
+                        "Недостаток"
+                    } else if deviation.deviation_at_request_gbq > 0.0 {
+                        "Избыток"
+                    } else {
+                        "Соответствует"
+                    }
+                }
+                span {
+                    "{format_deviation_activity(deviation.deviation_at_request_gbq)} · {format_deviation_percent(deviation.deviation_percent)}"
+                }
+            }
+            small { class: "actual-comparison",
+                "К фасовке: план {format_activity_value(deviation.requested_at_filling_gbq)} · факт {format_activity_value(deviation.actual_at_filling_gbq)} ГБк"
+            }
+        } else {
+            span { class: "actual-result-pending", "Ожидает данных" }
+        }
+    }
 }
 
 fn sanitize_print_title(value: &str) -> String {
@@ -681,6 +716,16 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                                 &filling_start.read(),
                                 isotope_half_life_minutes,
                             ),
+                            deviation: actual_fill_deviation(
+                                &consumer.activity,
+                                &consumer.requested_time,
+                                &filling_start.read(),
+                                isotope_half_life_minutes,
+                                &[(
+                                    consumer.actual_fill_activity_mbq.as_str(),
+                                    consumer.actual_fill_time.as_str(),
+                                )],
+                            ),
                         }
                     })
                     .collect();
@@ -802,6 +847,7 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
         style { {PRINT_THEME_STYLE} }
         style { {REPORT_TITLE_STYLE} }
         style { {ACTUAL_FILL_STYLE} }
+        style { {VERTICAL_PAGE_SCROLL_STYLE} }
         main { class: "shell", style: "{interface_theme_style}",
             header { class: "topbar",
                 div { class: "title-and-tabs",
@@ -1368,7 +1414,7 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                                                     }
                                                 }
                                                 td {
-                                                    TimeField {
+                                                    ManualTimeField {
                                                         value: vial.actual_fill_time.clone(),
                                                         oninput: {
                                                             let consumer_index = vial.consumer_index;
@@ -1413,50 +1459,33 @@ fn CalculationTab(props: CalculationTabProps) -> Element {
                                                         span { class: "actual-fill-pending-value", "—" }
                                                     }
                                                 }
-                                                if vial_position == 0 {
-                                                    td {
-                                                        class: "actual-request-cell",
-                                                        rowspan: "{group.vials.len()}",
-                                                        strong {
-                                                            "{format_activity(&group.requested_activity_gbq).unwrap_or_else(|| \"—\".into())}"
-                                                        }
-                                                        small { "на {group.requested_time}" }
-                                                        if group.vials.len() > 1 {
-                                                            span {
-                                                                "{group.vials.len()} {vial_noun(group.vials.len())} · {group.name}"
-                                                            }
-                                                        }
+                                                td { class: "actual-request-cell",
+                                                    strong {
+                                                        "{format_activity(&vial.requested_activity_gbq).unwrap_or_else(|| \"—\".into())}"
                                                     }
-                                                    td {
-                                                        class: "actual-result-cell",
-                                                        rowspan: "{group.vials.len()}",
-                                                        if let Some(deviation) = group.deviation {
-                                                            div {
-                                                                class: if deviation.deviation_at_request_gbq < 0.0 {
-                                                                    "actual-result-badge deficit"
-                                                                } else {
-                                                                    "actual-result-badge excess"
-                                                                },
-                                                                strong {
-                                                                    if deviation.deviation_at_request_gbq < 0.0 {
-                                                                        "Недостаток"
-                                                                    } else if deviation.deviation_at_request_gbq > 0.0 {
-                                                                        "Избыток"
-                                                                    } else {
-                                                                        "Соответствует"
-                                                                    }
-                                                                }
-                                                                span {
-                                                                    "{format_deviation_activity(deviation.deviation_at_request_gbq)} · {format_deviation_percent(deviation.deviation_percent)}"
-                                                                }
-                                                            }
-                                                            small { class: "actual-comparison",
-                                                                "К фасовке: план {format_activity_value(deviation.requested_at_filling_gbq)} · факт {format_activity_value(deviation.actual_at_filling_gbq)} ГБк"
-                                                            }
-                                                        } else {
-                                                            span { class: "actual-result-pending", "Ожидает данных" }
-                                                        }
+                                                    small { "на {group.requested_time}" }
+                                                }
+                                                td { class: "actual-result-cell",
+                                                    ActualDeviationResult { deviation: vial.deviation }
+                                                }
+                                            }
+                                        }
+                                        if group.vials.len() > 1 {
+                                            tr { class: "actual-group-total",
+                                                td { colspan: "4",
+                                                    strong { "Итого по заявке «{group.name}»" }
+                                                    span {
+                                                        "{group.vials.len()} {vial_noun(group.vials.len())}"
                                                     }
+                                                }
+                                                td { class: "actual-request-cell",
+                                                    strong {
+                                                        "{format_activity(&group.requested_activity_gbq).unwrap_or_else(|| \"—\".into())}"
+                                                    }
+                                                    small { "на {group.requested_time}" }
+                                                }
+                                                td { class: "actual-result-cell",
+                                                    ActualDeviationResult { deviation: group.deviation }
                                                 }
                                             }
                                         }
@@ -2376,3 +2405,4 @@ const PRINT_ADJUSTMENT_STYLE: &str = ".print-adjustment.dilution{border-color:va
 const PRINT_THEME_STYLE: &str = ".print-document{border:1px solid color-mix(in srgb,var(--interface-accent) 38%,#dce3ec)}.print-metadata>div{background:color-mix(in srgb,var(--interface-light) 22%,white);border-color:color-mix(in srgb,var(--interface-accent) 34%,#cbd5e1)}.print-metadata strong{color:var(--interface-dark)}.print-table th{background:color-mix(in srgb,var(--interface-light) 74%,white);color:var(--interface-dark)}.print-table th,.print-table td{border-color:color-mix(in srgb,var(--interface-accent) 42%,#98a2b3)}.print-table tfoot td{background:color-mix(in srgb,var(--interface-light) 54%,white);color:var(--interface-dark)}.print-table .print-volume-column{background:color-mix(in srgb,var(--interface-light) 82%,white);border-left-color:var(--interface-accent);border-right-color:var(--interface-accent);color:var(--interface-dark)}.print-adjustment,.print-adjustment.dilution,.print-adjustment.excess{border-color:var(--interface-accent);background:color-mix(in srgb,var(--interface-light) 76%,white);color:var(--interface-dark)}@media print{.print-metadata>div,.print-table th,.print-table tfoot td,.print-table .print-volume-column,.print-adjustment,.print-adjustment.dilution,.print-adjustment.excess{-webkit-print-color-adjust:exact;print-color-adjust:exact}.print-table th{background:color-mix(in srgb,var(--interface-light) 74%,white)!important;color:var(--interface-dark)!important}.print-table tfoot td{background:color-mix(in srgb,var(--interface-light) 54%,white)!important;color:var(--interface-dark)!important}.print-table .print-volume-column{background:color-mix(in srgb,var(--interface-light) 82%,white)!important;border-color:var(--interface-accent)!important;color:var(--interface-dark)!important}.print-adjustment,.print-adjustment.dilution,.print-adjustment.excess{background:color-mix(in srgb,var(--interface-light) 76%,white)!important;border-color:var(--interface-accent)!important;color:var(--interface-dark)!important}}";
 const REPORT_TITLE_STYLE: &str = ".application-heading{display:flex;min-width:190px;max-width:310px;flex-direction:column;justify-content:center}.application-heading h1,.application-heading p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.application-heading .active-report-title{margin:3px 0 0;color:var(--interface-dark);font-weight:700}";
 const ACTUAL_FILL_STYLE: &str = ".actual-fill-section{min-width:980px;padding:18px 16px 22px;border-top:3px solid color-mix(in srgb,var(--interface-accent) 48%,#dce3ec);background:color-mix(in srgb,var(--interface-light) 16%,white)}.actual-fill-heading{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:12px}.actual-fill-heading h2{color:var(--interface-dark)}.actual-fill-heading p{margin:3px 0 0;color:#68778f;font-size:calc(12px + var(--font-increase))}.actual-filling-time{display:flex;align-items:center;gap:9px;padding:7px 11px;border:1px solid color-mix(in srgb,var(--interface-accent) 42%,#cbd5e1);border-radius:8px;background:var(--interface-light);color:var(--interface-dark)}.actual-filling-time span{font-size:calc(11px + var(--font-increase));font-weight:600}.actual-filling-time strong{font-size:calc(16px + var(--font-increase));font-variant-numeric:tabular-nums}.actual-fill-table{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:calc(13px + var(--font-increase));background:color-mix(in srgb,var(--interface-light) 8%,white);border:1px solid color-mix(in srgb,var(--interface-accent) 30%,#dce3ec);border-radius:9px;overflow:hidden}.actual-fill-table th,.actual-fill-table td{padding:8px;border-right:1px solid color-mix(in srgb,var(--interface-accent) 20%,#e5eaf0);border-bottom:1px solid color-mix(in srgb,var(--interface-accent) 20%,#e5eaf0);text-align:center;vertical-align:middle}.actual-fill-table th:last-child,.actual-fill-table td:last-child{border-right:0}.actual-fill-table tbody tr:last-child td{border-bottom:0}.actual-fill-table th{background:color-mix(in srgb,var(--interface-light) 72%,white);color:var(--interface-dark);font-size:calc(11px + var(--font-increase));text-transform:uppercase}.actual-fill-table th small{display:block;margin-top:3px;font-size:calc(10px + var(--font-increase));text-transform:none}.actual-fill-table th:nth-child(1){width:20%}.actual-fill-table th:nth-child(2){width:14%}.actual-fill-table th:nth-child(3){width:16%}.actual-fill-table th:nth-child(4){width:14%}.actual-fill-table th:nth-child(5){width:14%}.actual-fill-table th:nth-child(6){width:22%}.actual-fill-table input{height:calc(34px + var(--font-increase))!important;padding-top:5px!important;padding-bottom:5px!important}.actual-vial-name{text-align:left!important}.actual-vial-name strong,.actual-vial-name small{display:block}.actual-vial-name small{margin-top:3px;color:#68778f}.actual-vial-group td{background:color-mix(in srgb,var(--interface-light) 25%,white)}.actual-vial-first td{border-top:2px solid color-mix(in srgb,var(--interface-accent) 55%,#dce3ec)}.actual-vial-last td{border-bottom:2px solid color-mix(in srgb,var(--interface-accent) 55%,#dce3ec)}.actual-request-cell strong,.actual-request-cell small,.actual-request-cell span{display:block}.actual-request-cell strong{font-size:calc(15px + var(--font-increase));color:var(--interface-dark)}.actual-request-cell small{margin-top:3px;color:#68778f}.actual-request-cell span{margin-top:5px;color:var(--interface-dark);font-size:calc(10px + var(--font-increase));font-weight:700}.actual-result-badge{display:flex;flex-direction:column;align-items:center;gap:3px;padding:7px 9px;border-radius:8px;border:1px solid}.actual-result-badge.excess{background:#dcfce7;border-color:#86d7a8;color:#166534}.actual-result-badge.deficit{background:#fee2e2;border-color:#f3a6a6;color:#991b1b}.actual-result-badge span{font-variant-numeric:tabular-nums}.actual-comparison{display:block;margin-top:5px;color:#68778f;line-height:1.25}.actual-result-pending{display:inline-block;padding:6px 9px;border-radius:7px;background:#eef2f6;color:#68778f;font-weight:700}.actual-fill-pending-value{color:#98a2b3}.actual-fill-empty{padding:22px;border:1px dashed color-mix(in srgb,var(--interface-accent) 38%,#cbd5e1);border-radius:9px;text-align:center;color:#68778f}.actual-activity-input .field-unit{right:8px}.shell .actual-fill-table .time-menu{top:auto;bottom:100%;max-height:180px}";
+const VERTICAL_PAGE_SCROLL_STYLE: &str = "html,body,#main{height:auto!important;min-height:100%;overflow-x:hidden!important;overflow-y:auto!important}.shell{height:auto!important;min-height:100vh!important;overflow:visible!important}.workspace{height:auto!important;min-height:calc(100vh - 72px)!important;overflow:visible!important;align-items:start!important}.sidebar{height:auto!important;align-self:start}.results.panel{height:auto!important;min-height:calc(100vh - 100px)!important;overflow:visible!important}.results-table-scroll{flex:none!important;min-height:0!important;max-height:none!important;overflow-x:auto!important;overflow-y:visible!important}.integrated-results-table tfoot td{position:static!important}.actual-group-total td{background:color-mix(in srgb,var(--interface-light) 68%,white)!important;border-top:2px solid var(--interface-accent)!important}.actual-group-total td:first-child{text-align:right!important}.actual-group-total td:first-child strong,.actual-group-total td:first-child span{display:inline-block}.actual-group-total td:first-child span{margin-left:10px;color:#68778f}.manual-time-field input{font-variant-numeric:tabular-nums}";

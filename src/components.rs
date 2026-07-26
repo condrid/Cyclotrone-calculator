@@ -195,3 +195,25 @@ pub(crate) fn TimeField(value: String, oninput: EventHandler<String>) -> Element
         }
     }
 }
+
+#[component]
+pub(crate) fn ManualTimeField(value: String, oninput: EventHandler<String>) -> Element {
+    let valid = value.is_empty() || is_valid_time(&value);
+
+    rsx! {
+        div { class: "time-field manual-time-field",
+            input {
+                r#type: "text",
+                value: "{value}",
+                placeholder: "ЧЧ:ММ",
+                maxlength: "5",
+                inputmode: "numeric",
+                class: if valid { "" } else { "invalid" },
+                oninput: move |event| oninput.call(format_time_input(&event.value()))
+            }
+            if !valid {
+                small { "Строго ЧЧ:ММ" }
+            }
+        }
+    }
+}
