@@ -1079,7 +1079,7 @@ dependencies = [
 
 [[package]]
 name = "dioxus_windows_form"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "dioxus",
  "dioxus-signals",
