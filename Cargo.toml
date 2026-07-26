@@ -1,6 +1,6 @@
 [package]
-name = "dioxus_windows_form"
-version = "0.2.3"
+name = "cyclcalc"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]

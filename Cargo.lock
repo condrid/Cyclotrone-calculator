@@ -625,6 +625,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cyclcalc"
+version = "0.3.0"
+dependencies = [
+ "dioxus",
+ "dioxus-signals",
+ "palette",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "darling"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1075,18 +1087,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
-]
-
-[[package]]
-name = "dioxus_windows_form"
-version = "0.2.3"
-dependencies = [
- "dioxus",
- "dioxus-signals",
- "palette",
- "rusqlite",
- "serde",
- "serde_json",
 ]
 
 [[package]]
