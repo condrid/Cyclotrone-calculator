@@ -6,6 +6,7 @@ pub(crate) const VIAL_FILL_LIMIT_RATIO: f64 = 14.5 / 15.0;
 pub(crate) struct ActualFillDeviation {
     pub(crate) requested_at_filling_gbq: f64,
     pub(crate) actual_at_filling_gbq: f64,
+    pub(crate) actual_at_request_gbq: f64,
     pub(crate) deviation_at_request_gbq: f64,
     pub(crate) deviation_percent: f64,
 }
@@ -314,12 +315,14 @@ pub(crate) fn actual_fill_deviation(
         .into_iter()
         .sum::<f64>();
     let deviation_at_filling = actual_at_filling - requested_at_filling;
-    let deviation_at_request =
-        deviation_at_filling * 2_f64.powf(-(request_elapsed_minutes as f64) / half_life_minutes);
+    let decay_to_request = 2_f64.powf(-(request_elapsed_minutes as f64) / half_life_minutes);
+    let actual_at_request = actual_at_filling * decay_to_request;
+    let deviation_at_request = deviation_at_filling * decay_to_request;
 
     Some(ActualFillDeviation {
         requested_at_filling_gbq: requested_at_filling,
         actual_at_filling_gbq: actual_at_filling,
+        actual_at_request_gbq: actual_at_request,
         deviation_at_request_gbq: deviation_at_request,
         deviation_percent: deviation_at_request / requested_activity * 100.0,
     })
@@ -485,6 +488,7 @@ mod tests {
 
         assert!((deviation.requested_at_filling_gbq - 14.60).abs() < 0.01);
         assert!((deviation.actual_at_filling_gbq - 15.0).abs() < 0.001);
+        assert!((deviation.actual_at_request_gbq - 10.27).abs() < 0.01);
         assert!((deviation.deviation_at_request_gbq - 0.27).abs() < 0.01);
         assert!((deviation.deviation_percent - 2.70).abs() < 0.05);
     }
